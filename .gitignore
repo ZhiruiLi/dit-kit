@@ -1,6 +1,9 @@
 # 编译产物（用 ./build.sh 重新生成，不入库）
 build/
 
+# 测试中间产物与素材（用 ./tests/run.sh 自动生成）
+tests/work/
+
 # macOS 系统文件
 .DS_Store
 ._*

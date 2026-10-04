@@ -153,6 +153,12 @@ dit-kit/
 │   ├── PageLUT.{h,m}       LUT 批量套用页（GUI + CLI）
 │   ├── PageTrim.{h,m}      视频裁剪页（GUI + CLI）
 │   └── Info.plist
+├── tests/                  测试套件（见 tests/README.md）
+│   ├── run.sh              入口
+│   ├── lib.sh              断言库
+│   ├── mkfixtures.sh       合成测试素材
+│   ├── helpers/probe.py    像素探针
+│   └── cases/*.sh          6 组用例，共 60+ 条
 ├── apply-lut.sh            独立的纯 shell 批量套 LUT 脚本，不依赖 App
 ├── build.sh                编译打包
 ├── render-preview.sh       渲染 preview/ 下的界面截图
@@ -172,6 +178,24 @@ dit-kit/
 3. 如果需要在 `--cli` 下也能用，再加一个 `+runCLI:` 和 `+cliUsage`，并在 `RunCLI()` 里分发。
 
 构建脚本不用动。
+
+---
+
+## 测试
+
+```bash
+./tests/run.sh                     # 跑全部（首次会自动合成素材）
+./tests/run.sh --filter 裁剪        # 只跑某一组
+./tests/run.sh --list              # 列出全部用例
+```
+
+输出是 TAP 风格的 `ok` / `not ok`，退出码 0 才算全过。60 多条用例覆盖命令行接口、时间码解析、LUT 套用与冲突策略、裁剪精度、引擎停止收尾、界面渲染。
+
+**测试素材完全由 `ffmpeg -f lavfi` 合成**，不依赖任何外部文件，换一台机器能跑出一模一样的结果。核心是一条「时间码标尺」视频：每 0.5 秒一种固定纯色、关键帧严格落在整秒 —— 于是「裁剪起点对不对」可以变成一条精确断言，而不是靠肉眼看。同理，LUT 测试用的是**精确交换 R/B 通道**的线性 cube，「输入 (R,G,B) 必须得到 (B,G,R)」是硬条件，比「颜色变了没」强得多。
+
+界面用例靠自检模式截图，优先走窗口合成、拿不到时自动退回视图缓存，所以不依赖录屏权限。
+
+细节（怎么加用例、可用的断言、每组覆盖了什么）见 **[tests/README.md](tests/README.md)**。
 
 ---
 
@@ -210,6 +234,9 @@ VF_PRE='zscale=t=linear:npl=100,tonemap=hable:desat=0,zscale=p=bt709:t=bt709:m=b
 - **视频编码默认走 VideoToolbox 硬编**（`hevc_videotoolbox`）。Apple Silicon 上最快；Intel Mac 上取决于该机型 GPU 的 VideoToolbox 支持情况。
 - **仅限 macOS**，用了 AppKit。
 - 裁剪的 `--exact` 模式音频会重编码为 AAC 192k（切点通常不落在音频帧边界上，必须重编才能对齐）；`--fast` 模式则原样复制音频。
+- **点「停止」时正在跑的那个任务会留下一个残片**。ffmpeg 收到 SIGTERM 是优雅退出、会把容器写完，所以这个残片是**可播放的**（不是坏文件）。但它带输出后缀，下次同一批再跑时 `--conflict skip` 会把它当成已完成而跳过 —— 有拿残片当成品用的风险。
+- **路径里含隐藏目录的输入会被跳过**，和隐藏文件一样。这是有意的（避免扫到 `.Trash`、`.git` 之类），但如果你的素材放在某个以 `.` 开头的目录下，需要先搬出来。
+- **已知问题：起止完全落在源时长之外时，会产出空容器却报告成功。** `--exact --start 60 --end 90` 作用在 10 秒的源上，会生成一个约 257 字节、不含任何有效媒体的 mp4，而汇总行照样写「失败 0」。测试套件里有一条用例专门锁定这个行为（`裁剪 · 已知问题：空产物被报成完成`），修好后它会变红提醒。绕开办法：别让范围整体越过源尾。
 
 ## License
 

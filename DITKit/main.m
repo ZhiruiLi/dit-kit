@@ -118,7 +118,8 @@ static NSBitmapImageRep *DITCaptureWindow(NSWindow *win) {
         [self doLayout];
     }
 
-    if (getenv("DITKIT_AUTOSTART")) {
+    BOOL autostart = getenv("DITKIT_AUTOSTART") != NULL;
+    if (autostart) {
         id<DITToolPage> page = _pages[(NSUInteger)_currentPage];
         if ([page respondsToSelector:@selector(beginRun)]) [page beginRun];
     }
@@ -135,6 +136,32 @@ static NSBitmapImageRep *DITCaptureWindow(NSWindow *win) {
     NSString *shotPath = nil;
     const char *shot = getenv("DITKIT_SHOT");
     if (shot) shotPath = [NSString stringWithUTF8String:shot];
+
+    // DITKIT_EXIT_WHEN_IDLE：不再死等固定秒数，而是轮询到当前页处理完就收尾退出。
+    // 测试套件用这个，避免「sleep 28 秒但实际 9 秒就跑完」这种既慢又不稳的写法。
+    if (getenv("DITKIT_EXIT_WHEN_IDLE")) {
+        const char *limitEnv = getenv("DITKIT_TIMEOUT");
+        NSTimeInterval limit = limitEnv ? atof(limitEnv) : 60.0;
+        NSDate *t0 = [NSDate date];
+        __block BOOL sawBusy = NO;
+        [NSTimer scheduledTimerWithTimeInterval:0.15 repeats:YES block:^(NSTimer *tm) {
+            id<DITToolPage> page = self->_pages[(NSUInteger)self->_currentPage];
+            BOOL busy = page.busy;
+            if (busy) sawBusy = YES;
+            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:t0];
+            BOOL timedOut = elapsed > limit;
+            // 自动开始的场景必须先看到「忙过」，否则会在任务真正跑起来之前就退出
+            BOOL ready = autostart ? (sawBusy && !busy) : YES;
+            if ((ready && elapsed >= 0.8) || timedOut) {
+                [tm invalidate];
+                if (timedOut) printf("等待超时: %.0f 秒\n", limit);
+                if (shotPath.length) [self captureSelf:shotPath];
+                [self dumpDiagnostics];
+                [NSApp terminate:nil];
+            }
+        }];
+        return;
+    }
 
     const char *delayEnv = getenv("DITKIT_SHOT_DELAY");
     NSTimeInterval delay = delayEnv ? atof(delayEnv) : 1.6;
