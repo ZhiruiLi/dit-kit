@@ -58,6 +58,40 @@ build_ruler() {
         -c:a aac -b:a 96k -shortest "$out"
 }
 
+# 音高标尺：每 BAND 秒换一个纯音（TONE_BASE + TONE_STEP*i Hz，10 个一循环）。
+# 与画面标尺同一个思路 —— 有了它，「提取的音频区间对不对」可以变成
+# 「第几段音高」这样的精确断言，而不是「听起来差不多」。
+TONE_BASE=300
+TONE_STEP=100
+TONE_COUNT=10
+AUDIO_RATE=48000
+
+build_tone_ruler() {
+    local out="$1" w="$2" h="$3" fps="$4" secs="$5"
+    local n
+    n=$(awk -v s="$secs" -v b="$BAND" 'BEGIN { printf "%d", s / b }')
+    local vargs=() aargs=() fcv="" fca="" i=0
+    while [ "$i" -lt "$n" ]; do
+        local r g b hex f
+        read -r r g b <<<"${RULER_RGB[$((i % 10))]}"
+        printf -v hex '%02X%02X%02X' "$r" "$g" "$b"
+        f=$((TONE_BASE + TONE_STEP * (i % TONE_COUNT)))
+        vargs+=(-f lavfi -i "color=c=0x${hex}:s=${w}x${h}:r=${fps}:d=${BAND}")
+        aargs+=(-f lavfi -i "sine=frequency=${f}:sample_rate=${AUDIO_RATE}:duration=${BAND}")
+        fcv+="[$i:v]"
+        fca+="[$((n + i)):a]"
+        i=$((i + 1))
+    done
+    # 画面与声音各自 concat：视频输入在前、音频输入在后，所以两个 filter 各用一段
+    fcv+="concat=n=${n}:v=1:a=0[v]"
+    fca+="concat=n=${n}:v=0:a=1[a]"
+    "$FFMPEG" -y -v error "${vargs[@]}" "${aargs[@]}" \
+        -filter_complex "${fcv};${fca}" -map "[v]" -map "[a]" \
+        -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p \
+        -g "$fps" -keyint_min "$fps" -sc_threshold 0 \
+        -c:a aac -b:a 128k "$out"
+}
+
 # 调色板真源（生成端与断言端共用）
 i=0
 for c in "${RULER_RGB[@]}"; do
@@ -68,12 +102,21 @@ mv "$FIX/colors.tsv.tmp" "$FIX/colors.tsv"
 # 段长写进 manifest，断言端读它来算「某时刻应该是第几号颜色」，
 # 避免两处各写一个常数、改了这边忘了那边
 printf '%s\n' "$BAND" >"$FIX/band.txt"
+# 音高标尺的三个常数同理
+printf '%s %s %s\n' "$TONE_BASE" "$TONE_STEP" "$TONE_COUNT" >"$FIX/tones.txt"
 
 # A：主素材，10 秒 320x180@30（裁剪精度、LUT、批量都用它）
 build_ruler "$FIX/ruler_a.mp4" 320 180 30 10
 
 # B：规格不同，用来验证批量时各任务互不干扰，8 秒 480x270@20
 build_ruler "$FIX/ruler_b.mp4" 480 270 20 8
+
+# C：音高标尺，6 秒 —— 提取音频的区间断言用它（画面同时验证「视频进、音频出」）。
+# 6 秒 = 12 段，音高正好走完一轮多一点点。
+build_tone_ruler "$FIX/tone_ruler.mp4" 320 180 30 6
+
+# C2：同一段音高的纯音频版本，验证「音频进、音频出」也能用
+"$FFMPEG" -y -v error -i "$FIX/tone_ruler.mp4" -vn -c:a copy "$FIX/tone_ruler.m4a"
 
 # 纯色素材：整段一个颜色，LUT 断言用它，帧均值最稳定
 "$FFMPEG" -y -v error \
@@ -127,7 +170,8 @@ EOF
 # 纯色素材的实际颜色（供断言端读取）
 printf '128\t64\t32\n' >"$FIX/solid.tsv"
 
-for f in ruler_a.mp4 ruler_b.mp4 solid.mp4 long.mp4 swap.cube identity.cube colors.tsv band.txt; do
+for f in ruler_a.mp4 ruler_b.mp4 tone_ruler.mp4 tone_ruler.m4a solid.mp4 long.mp4 \
+    swap.cube identity.cube colors.tsv band.txt tones.txt; do
     [ -s "$FIX/$f" ] || {
         echo "生成失败: $f" >&2
         exit 1

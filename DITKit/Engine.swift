@@ -65,10 +65,19 @@ final class DITOutputOptions {
     var outValue = "out"
     /// 输出文件名后缀
     var suffix = "_out"
+    /// 输出容器的扩展名（不含点）。留空表示沿用源文件的扩展名；
+    /// 换了容器的工具（如把视频里的声音提成音频）必须指定它。
+    var outputExtension: String?
     var conflict: DITConflictPolicy = .skip
     var maxConcurrent = 4
     /// 空格分隔的小写扩展名
     var extensionFilter = "mp4 mov m4v mkv avi mxf mp4v hevc ts"
+
+    /// 实际使用的输出扩展名
+    func resolvedExtension(sourceExtension: String) -> String {
+        guard let e = outputExtension, !e.isEmpty else { return sourceExtension }
+        return e
+    }
 }
 
 /// 把任务翻译成 ffmpeg 参数：必须自带 `-i <输入>`，但不要带输出文件名（引擎会补）
@@ -242,7 +251,7 @@ final class DITEngine {
         }
 
         let stem = ((inPath as NSString).lastPathComponent as NSString).deletingPathExtension
-        let ext = (inPath as NSString).pathExtension
+        let ext = output.resolvedExtension(sourceExtension: (inPath as NSString).pathExtension)
         var name = "\(stem)\(output.suffix).\(ext)"
         var outPath = (dir as NSString).appendingPathComponent(name)
 
@@ -616,33 +625,12 @@ extension DITEngine {
         return String(format: "%02d:%02d:%02d.%03d", h, m, sec, ms)
     }
 
-    /// 用 ffprobe 读取媒体时长（秒），失败返回 0
-    static func probeDuration(_ path: String) -> Double {
-        guard let ffprobe = resolveTool("ffprobe") else { return 0 }
-        let t = Process()
-        t.executableURL = URL(fileURLWithPath: ffprobe)
-        t.arguments = ["-v", "error", "-show_entries", "format=duration",
-                       "-of", "default=nw=1:nk=1", path]
-        let p = Pipe()
-        t.standardOutput = p
-        t.standardError = Pipe()
-        t.standardInput = FileHandle.nullDevice
-        do { try t.run() } catch { return 0 }
-        let d = p.fileHandleForReading.readDataToEndOfFile()
-        t.waitUntilExit()
-        let s = String(data: d, encoding: .utf8) ?? ""
-        let v = (s as NSString).doubleValue
-        return (v.isFinite && v > 0) ? v : 0
-    }
-
-    /// 用 ffprobe 读取一行媒体摘要（分辨率 / 帧率 / 编码），失败返回 nil
-    static func probeSummary(_ path: String) -> String? {
+    /// 跑一次 ffprobe 并取回标准输出；ffprobe 不在、或进程起不来时返回 nil
+    private static func probeOutput(_ args: [String]) -> String? {
         guard let ffprobe = resolveTool("ffprobe") else { return nil }
         let t = Process()
         t.executableURL = URL(fileURLWithPath: ffprobe)
-        t.arguments = ["-v", "error", "-select_streams", "v:0",
-                       "-show_entries", "stream=codec_name,width,height,r_frame_rate",
-                       "-of", "default=nw=1", path]
+        t.arguments = args
         let p = Pipe()
         t.standardOutput = p
         t.standardError = Pipe()
@@ -650,14 +638,70 @@ extension DITEngine {
         do { try t.run() } catch { return nil }
         let d = p.fileHandleForReading.readDataToEndOfFile()
         t.waitUntilExit()
-        let s = String(data: d, encoding: .utf8) ?? ""
-        if s.isEmpty { return nil }
+        return String(data: d, encoding: .utf8)
+    }
 
+    /// ffprobe 的 `key=value` 输出解析成字典
+    private static func keyValues(_ text: String) -> [String: String] {
         var kv: [String: String] = [:]
-        for line in s.components(separatedBy: "\n") {
+        for line in text.components(separatedBy: "\n") {
             guard let eq = line.range(of: "=") else { continue }
             kv[String(line[line.startIndex..<eq.lowerBound])] = String(line[eq.upperBound...])
         }
+        return kv
+    }
+
+    /// 用 ffprobe 读取媒体时长（秒），失败返回 0
+    static func probeDuration(_ path: String) -> Double {
+        guard let s = probeOutput(["-v", "error", "-show_entries", "format=duration",
+                                   "-of", "default=nw=1:nk=1", path]) else { return 0 }
+        let v = (s as NSString).doubleValue
+        return (v.isFinite && v > 0) ? v : 0
+    }
+
+    /// 首个音频流的概况；没有音频流时返回 nil
+    static func probeAudioStream(_ path: String) -> (codec: String, sampleRate: Int, channels: Int)? {
+        guard let s = probeOutput(["-v", "error", "-select_streams", "a:0",
+                                   "-show_entries", "stream=codec_name,sample_rate,channels",
+                                   "-of", "default=nw=1", path]) else { return nil }
+        if s.isEmpty { return nil }
+        let kv = keyValues(s)
+        let codec = kv["codec_name"] ?? ""
+        if codec.isEmpty { return nil }
+        return (codec,
+                ((kv["sample_rate"] ?? "") as NSString).integerValue,
+                ((kv["channels"] ?? "") as NSString).integerValue)
+    }
+
+    /// 音频流的一行摘要，如 `aac 48kHz 立体声`；没有音频流时返回 nil
+    static func probeAudioSummary(_ path: String) -> String? {
+        guard let a = probeAudioStream(path) else { return nil }
+        var bits = [a.codec]
+        if a.sampleRate > 0 {
+            let k = Double(a.sampleRate) / 1000.0
+            bits.append(a.sampleRate % 1000 == 0
+                        ? "\(a.sampleRate / 1000)kHz"
+                        : String(format: "%.1fkHz", k))
+        }
+        if a.channels > 0 { bits.append(channelName(a.channels)) }
+        return bits.joined(separator: " ")
+    }
+
+    private static func channelName(_ n: Int) -> String {
+        switch n {
+        case 1: return "单声道"
+        case 2: return "立体声"
+        default: return "\(n) 声道"
+        }
+    }
+
+    /// 用 ffprobe 读取一行媒体摘要（分辨率 / 帧率 / 编码），失败返回 nil
+    static func probeSummary(_ path: String) -> String? {
+        guard let s = probeOutput(["-v", "error", "-select_streams", "v:0",
+                                   "-show_entries", "stream=codec_name,width,height,r_frame_rate",
+                                   "-of", "default=nw=1", path]) else { return nil }
+        if s.isEmpty { return nil }
+        let kv = keyValues(s)
 
         var bits: [String] = []
         let w = ((kv["width"] ?? "") as NSString).integerValue

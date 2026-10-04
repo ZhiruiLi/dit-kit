@@ -87,6 +87,10 @@ c_renders_both_pages() {
     png=$(render trim-page 1 dark DITKIT_TRIM_START=00:00:02 DITKIT_TRIM_END=00:00:05)
     require_capture "$png"
     expect_window_width "$png"
+
+    png=$(render audio-page 2 dark DITKIT_AUDIO_START=00:00:01 DITKIT_AUDIO_END=00:00:03)
+    require_capture "$png"
+    expect_window_width "$png"
 }
 
 c_renders_light_theme() {
@@ -126,7 +130,7 @@ c_diagnostics_sane() {
         DITKIT_APPEARANCE=dark DITKIT_PAGE=0 \
         DITKIT_LUT="$FIX/identity.cube" DITKIT_DROP="$FIX/ruler_a.mp4")
     gui_ran "$log" || skip "自检没能启动"
-    expect_contains "$log" "工具页  : 2 个" "工具页数量"
+    expect_contains "$log" "工具页  : 3 个" "工具页数量"
     expect_contains "$log" "窗口    : " "窗口诊断"
     subs=$(printf '%s' "$log" | sed -n 's/.*子视图 \([0-9]*\) 个.*/\1/p' | head -1)
     expect_ge "$subs" 10 "LUT 页子视图数（界面确实搭起来了）"
@@ -146,7 +150,7 @@ c_starts_with_fresh_preferences() {
     expect_contains "$log" "当前页视图:" "页面视图诊断"
 }
 
-# 裁剪页也要能渲染出有内容的图（两页共用同一套布局容器）
+# 裁剪页也要能渲染出有内容的图（三页共用同一套布局容器）
 c_trim_page_has_content() {
     gui_available || skip "当前会话没有图形界面"
     local png
@@ -154,6 +158,32 @@ c_trim_page_has_content() {
     require_capture "$png"
     expect_eq "content" "$(image_band "$png" 70 200)" "裁剪页顶栏区间应当有内容"
     expect_eq "content" "$(image_band "$png" 260 700)" "裁剪页主体区间应当有内容"
+}
+
+# 音频页：渲染有内容、列表同样是拖入区、源信息会报出音频流概况。
+# 两个素材都复制成短名字并放进同一个目录 —— 源信息取列表里第一个文件，
+# 而诊断行会把标签截到 26 个字符，用长文件名就把「音频概况」整段截掉了。
+c_audio_page_works() {
+    gui_available || skip "当前会话没有图形界面"
+    local d png log line
+    d=$(fresh_dir gui-audio)
+    cp "$FIX/tone_ruler.m4a" "$d/a.m4a"
+    cp "$FIX/tone_ruler.mp4" "$d/b.mp4"
+
+    png=$(render audio-body 2 dark DITKIT_AUDIO_START=00:00:01 DITKIT_AUDIO_END=00:00:03)
+    require_capture "$png"
+    expect_eq "content" "$(image_band "$png" 70 200)" "音频页顶栏区间应当有内容"
+    expect_eq "content" "$(image_band "$png" 260 700)" "音频页主体区间应当有内容"
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/audio-list.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=2 \
+        DITKIT_DROP="$d/a.m4a|$d/b.mp4")
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" "[2] 音频提取" "页切换器上应当有音频页"
+    line=$(gui_list_line "$log")
+    expect_eq "2" "$(gui_rows "$line")" "拖入两个文件后的列表行数"
+    expect_contains "$log" "aac 48kHz 单声道" "源信息应当报出音频流概况"
 }
 
 # ---------- 任务列表：把诊断行拆成可断言的小块 ----------
@@ -320,11 +350,12 @@ c_list_is_the_only_drop_target() {
 }
 
 reg \
-    "两个工具页都能渲染出图"            c_renders_both_pages \
+    "三个工具页都能渲染出图"            c_renders_both_pages \
     "浅色主题也能渲染"                  c_renders_light_theme \
     "顶栏（标题与页切换器）真的画出来了" c_top_bar_has_content \
     "页面主体真的画出来了"              c_page_body_has_content \
     "裁剪页也画得有内容"                c_trim_page_has_content \
+    "音频页也画得有内容且列表可用"       c_audio_page_works \
     "自检诊断信息正常"                  c_diagnostics_sane \
     "干净偏好下能正常启动"              c_starts_with_fresh_preferences \
     "LUT 拖入会挡掉错误的后缀名"         c_lut_drop_rejects_wrong_extension \

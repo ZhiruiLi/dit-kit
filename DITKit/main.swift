@@ -2,8 +2,8 @@
 //  main.swift —— DITKit 入口与主窗口
 //
 //  DITKit 是个视频工具箱：主窗口只负责标题栏、ffmpeg 状态和工具页切换，
-//  每个具体功能都是一个独立的 DITToolPage（见 PageLUT.swift / PageTrim.swift）。
-//  要加新工具，写一个新的 Page 类、在这里的 pages 数组里挂上即可。
+//  每个具体功能都是一个独立的 DITToolPage（见 PageLUT.swift / PageTrim.swift /
+//  PageAudio.swift）。要加新工具，写一个新的 Page 类、在这里的 pages 数组里挂上即可。
 //
 
 import AppKit
@@ -396,7 +396,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         topBar.addSubview(ffmpegLabel)
 
         // 工具页切换
-        pages = [PageLUT(), PageTrim()]
+        pages = [PageLUT(), PageTrim(), PageAudio()]
         pageSwitch = NSSegmentedControl(frame: .zero)
         pageSwitch.segmentCount = pages.count
         for (i, p) in pages.enumerated() {
@@ -467,20 +467,24 @@ private func PrintUsage() {
     var text = "DITKit —— 视频工具箱\n\n"
     text += "  DITKit                                 打开图形界面\n"
     text += "  DITKit --cli --lut  <LUT> [选项] -- <视频...>    批量套 LUT\n"
-    text += "  DITKit --cli --trim --end <时间> [选项] -- <视频...>   裁剪片段\n\n"
+    text += "  DITKit --cli --trim --end <时间> [选项] -- <视频...>   裁剪片段\n"
+    text += "  DITKit --cli --audio [--start <时间>] [--end <时间>] [选项] -- <文件...>   提取音频\n\n"
     text += "LUT 模式:\n" + PageLUT.cliUsage + "\n"
-    text += "裁剪模式:\n" + PageTrim.cliUsage
+    text += "裁剪模式:\n" + PageTrim.cliUsage + "\n"
+    text += "音频提取模式:\n" + PageAudio.cliUsage
     FileHandle.standardError.write(Data(text.utf8))
 }
 
 private func RunCLI(_ args: [String]) -> Int32 {
-    var wantsLUT = false, wantsTrim = false
+    var wantsLUT = false, wantsTrim = false, wantsAudio = false
     for a in args {
         if a == "--lut" { wantsLUT = true }
         if a == "--trim" { wantsTrim = true }
+        if a == "--audio" { wantsAudio = true }
     }
     if wantsLUT { return PageLUT.runCLI(args) }
     if wantsTrim { return PageTrim.runCLI(args) }
+    if wantsAudio { return PageAudio.runCLI(args) }
     PrintUsage()
     return 2
 }

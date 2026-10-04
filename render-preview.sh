@@ -82,8 +82,10 @@ render() { # render <名称> <外观> <页号> <drop> [额外环境...]
     fi
 }
 
-echo "==> 渲染 4 张界面截图到 $OUT/"
+echo "==> 渲染 6 张界面截图到 $OUT/"
 render ui-dark dark 0 "$VIDS"
 render ui-light light 0 "$VIDS"
 render trim-dark dark 1 "$VIDS" DITKIT_TRIM_START=00:00:03.000 DITKIT_TRIM_END=00:00:08.500
 render trim-light light 1 "$VIDS" DITKIT_TRIM_START=00:00:03.000 DITKIT_TRIM_END=00:00:08.500
+render audio-dark dark 2 "$VIDS" DITKIT_AUDIO_START=00:00:01.000 DITKIT_AUDIO_END=00:00:04.500
+render audio-light light 2 "$VIDS" DITKIT_AUDIO_START=00:00:01.000 DITKIT_AUDIO_END=00:00:04.500

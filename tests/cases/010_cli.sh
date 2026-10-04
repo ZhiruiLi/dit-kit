@@ -9,6 +9,7 @@ c_help_exit0() {
     out=$(run "$BIN" --help)
     expect_contains "$out" "LUT 模式" "帮助文本"
     expect_contains "$out" "裁剪模式" "帮助文本"
+    expect_contains "$out" "音频提取模式" "帮助文本"
     expect_contains "$out" "--conflict" "帮助文本"
     expect_eq "0" "$(exit_code "$BIN" --help)" "help 退出码"
 }

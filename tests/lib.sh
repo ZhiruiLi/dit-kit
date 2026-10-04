@@ -13,6 +13,7 @@ FIX="$WORK/fixtures"             # 素材缓存
 # 隐藏文件跳过（合理行为），素材若放在 .work/ 下就会一个都处理不了。
 CASES_DIR="$TESTS_DIR/cases"
 PROBE="$TESTS_DIR/helpers/probe.py"
+AUDIORANGE="$TESTS_DIR/helpers/audiorange.py"
 
 # ---------- 外部工具 ----------
 # 优先从 PATH 里找，找不到再退回 Homebrew 默认前缀；也可用 FFMPEG/FFPROBE 覆盖
@@ -178,6 +179,25 @@ probe_first_packet_flags() {
     "$FFPROBE" -v error -select_streams v:0 -show_entries packet=flags -of csv=p=0 "$1" 2>/dev/null | head -1
 }
 
+# 首个音频流的编码（产物是音频时用它断言容器换对了）
+probe_acodec() {
+    "$FFPROBE" -v error -select_streams a:0 -show_entries stream=codec_name -of csv=p=0 "$1" 2>/dev/null | head -1
+}
+
+# 首个音频流的采样率 / 声道数
+probe_arate() {
+    "$FFPROBE" -v error -select_streams a:0 -show_entries stream=sample_rate -of csv=p=0 "$1" 2>/dev/null | head -1
+}
+
+probe_achannels() {
+    "$FFPROBE" -v error -select_streams a:0 -show_entries stream=channels -of csv=p=0 "$1" 2>/dev/null | head -1
+}
+
+# 文件里有多少条流（用来断言「产物里确实没有画面」）
+probe_stream_count() {
+    "$FFPROBE" -v error -show_entries format=nb_streams -of csv=p=0 "$1" 2>/dev/null | head -1
+}
+
 # 视频流的帧数
 probe_vframes() {
     "$FFPROBE" -v error -select_streams v:0 -count_frames -show_entries stream=nb_read_frames -of csv=p=0 "$1" 2>/dev/null | head -1
@@ -235,6 +255,58 @@ ruler_expected() {
 # 读一个「R G B」参考文件（允许最前面多一列序号）
 read_rgb() {
     awk '{ print $(NF - 2), $(NF - 1), $NF }' "$1"
+}
+
+# ---------- 音高标尺 ----------
+# 音高标尺素材每 band_sec 秒换一个纯音，常数写在 tones.txt 里（生成端写、断言端读）
+
+# 源时间 t 时刻，音高标尺应该是第几号音高（Hz）
+tone_expected_hz() {
+    awk -v t="$1" -v b="$(band_sec)" '{ printf "%d", $1 + $2 * (int(t / b) % $3) }' "$FIX/tones.txt"
+}
+
+# 把媒体整段解成 16bit PCM wav，作为音频区间比对的参考
+audio_ref() {
+    "$FFMPEG" -y -v error -i "$1" -vn -c:a pcm_s16le "$2"
+}
+
+# 从 audiorange.py 的报告行里取一个字段：ar_field "offset=0 mad=0.000" offset -> 0
+ar_field() {
+    printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
+}
+
+# 音频区间探针：量出某时刻的主音高，输出一整行报告
+audio_tone_line() {
+    "$PYTHON" "$AUDIORANGE" tone "$1" "$2"
+}
+
+# 断言「输出某时刻的主音高是 X Hz」，并附注主次比（它就是这条断言的分辨力）
+expect_tone_at() { # <文件> <时刻> <期望 Hz> <标签>
+    local line got
+    line=$(audio_tone_line "$1" "$2")
+    got=$(printf '%s' "$line" | sed -n 's/^hz=\([0-9]*\).*/\1/p')
+    [ -n "$got" ] || fail "$4 取音高失败: $line"
+    note "  $4 @${2}s: $line"
+    expect_eq "$3" "$got" "$4（${2}s 处的主音高）"
+}
+
+# 断言「产物就是参考里 [起点, 终点) 那一段」。**产物必须是无损格式**（wav / flac）：
+# 有损重编码之后样本值本来就变了，逐样本比对无从谈起（那种情况请用 expect_tone_at）。
+#
+#   offset     量化起点位置。同一段解码最多差一个 AAC 帧（1024 样本）的定位误差，
+#              所以容差取一帧；位置真错了的话偏移会顶到搜索窗口边缘。
+#   mad        量化内容，正确提取时只剩浮点转整数的取整噪声。
+#   shift_mad  反证 —— 错开半个标尺段之后必须明显不同，
+#              否则上面那个 mad≈0 说明不了「位置对」。
+expect_audio_range() { # <参考 wav> <产物> <起点秒> <终点秒> <标签>
+    local rep off abs
+    rep=$("$PYTHON" "$AUDIORANGE" range "$1" "$2" "$3" "$4")
+    note "  $5: $rep"
+    expect_eq "$(ar_field "$rep" expect)" "$(ar_field "$rep" got)" "$5 样本数"
+    off=$(ar_field "$rep" offset); abs=${off#-}
+    expect_le "$abs" 1024 "$5 起点对齐偏移"
+    expect_le "$(ar_field "$rep" mad)" 1.0 "$5 对齐后平均绝对差"
+    expect_ge "$(ar_field "$rep" shift_mad)" 500 "$5 错开半段后应当明显不同"
 }
 
 # ---------- 素材 ----------
