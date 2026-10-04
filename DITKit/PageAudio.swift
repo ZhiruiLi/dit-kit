@@ -99,6 +99,79 @@ private func DITAudioRangeHint() -> String {
     "时间可以写 00:01:30.500，也可以写 90 / 1m30s；起点留空＝从头开始，终点留空＝提到结尾"
 }
 
+// MARK: - 波形视图
+
+/// 整段素材的波形 + 选中区间的高亮。
+///
+/// 波形图由 ffmpeg 的 showwavespic 生成，这里只负责画和标区间 —— 自己算峰值
+/// 需要先把整个音轨解成 PCM，而那是 ffmpeg 已经做得很好的事。
+///
+/// 波形横向拉开铺满：纵向缩放只是改变振幅的显示比例，时间轴仍然是线性的，
+/// 所以区间的比例位置可以直接按宽度换算，不需要再考虑长宽比。
+final class DITWaveformView: NSView {
+
+    var waveform: NSImage? { didSet { needsDisplay = true } }
+    /// 没有波形时居中显示的原因（「源里没有音频流」这类）
+    var placeholder: String? { didSet { needsDisplay = true } }
+
+    /// 选中区间占总时长的比例
+    var startFraction: Double = 0 { didSet { needsDisplay = true } }
+    var endFraction: Double = 1 { didSet { needsDisplay = true } }
+
+    /// 自检/诊断用：区间高亮画在哪
+    private(set) var bandRect: NSRect = .zero
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 1.0, dy: 1.0)
+        if r.width < 4 || r.height < 4 { return }
+
+        NSColor.controlBackgroundColor.setFill()
+        NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5).fill()
+
+        if let img = waveform {
+            img.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1.0)
+        } else if let placeholder {
+            DITDrawHintText(self, placeholder, nil,
+                            [.font: NSFont.systemFont(ofSize: 12.0),
+                             .foregroundColor: NSColor.tertiaryLabelColor],
+                            [:])
+        }
+
+        // 中位基线：整段静音时波形是一条直线，有它才看得出「这里本来该有东西」
+        NSColor.separatorColor.setStroke()
+        let mid = NSBezierPath()
+        mid.move(to: NSPoint(x: r.minX + 4, y: r.midY))
+        mid.line(to: NSPoint(x: r.maxX - 4, y: r.midY))
+        mid.lineWidth = 1.0
+        mid.stroke()
+
+        let f0 = CGFloat(max(0.0, min(1.0, startFraction)))
+        let f1 = CGFloat(max(0.0, min(1.0, endFraction)))
+        let x0 = r.minX + r.width * min(f0, f1)
+        let x1 = r.minX + r.width * max(f0, f1)
+
+        // 区间外压暗，区间内罩一层强调色 —— 一眼看出「会提出哪一段」
+        NSColor.windowBackgroundColor.withAlphaComponent(0.55).setFill()
+        NSRect(x: r.minX, y: r.minY, width: max(0.0, x0 - r.minX), height: r.height).fill(using: .sourceOver)
+        NSRect(x: x1, y: r.minY, width: max(0.0, r.maxX - x1), height: r.height).fill(using: .sourceOver)
+
+        bandRect = NSRect(x: x0, y: r.minY, width: max(1.0, x1 - x0), height: r.height)
+        NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
+        bandRect.fill(using: .sourceOver)
+
+        NSColor.controlAccentColor.setFill()
+        NSRect(x: x0, y: r.minY, width: 1.0, height: r.height).fill(using: .sourceOver)
+        NSRect(x: max(x0, x1 - 1.0), y: r.minY, width: 1.0, height: r.height).fill(using: .sourceOver)
+
+        NSColor.separatorColor.setStroke()
+        let border = NSBezierPath(roundedRect: r, xRadius: 5, yRadius: 5)
+        border.lineWidth = 1.0
+        border.stroke()
+    }
+}
+
 // MARK: - 工具页
 
 final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
@@ -119,6 +192,8 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
     private let startField = NSTextField(frame: .zero)
     private let endField = NSTextField(frame: .zero)
     private let wholeBtn = NSButton(frame: .zero)
+    private let waveCaption = DITLabel("", 11, false)
+    private let waveform = DITWaveformView(frame: .zero)
     private let lenLabel = DITLabel("", 11, false)
     private let rangeHint = DITLabel(DITAudioRangeHint(), 11, false)
 
@@ -149,6 +224,10 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
     private var concurrency = 4
     /// 命名冲突策略
     private var conflictIndex = 0
+    /// 防止旧的波形结果覆盖新画面
+    private var waveToken = 0
+    /// 波形状态（没有源 / 没有音轨 / 生成中 / 成功 / 失败），给诊断行用
+    private var waveState = "—"
 
     override init() {
         super.init()
@@ -203,6 +282,11 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
         wholeBtn.target = self
         wholeBtn.action = #selector(useWholeFile)
         layoutView.addSubview(wholeBtn)
+
+        // 整段波形 + 选中区间：这一页没有画面可看，波形就是「大致效果」
+        waveCaption.lineBreakMode = .byTruncatingTail
+        layoutView.addSubview(waveCaption)
+        layoutView.addSubview(waveform)
 
         layoutView.addSubview(lenLabel)
         layoutView.addSubview(rangeHint)
@@ -274,7 +358,11 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
         jobTable.emptyHint = "把要提取音频的文件拖到这里"
         jobTable.emptySubHint = "视频与音频都收；支持多选、多目录与整个文件夹，所有文件套用同一段区间"
         jobTable.onDropPaths = { [weak self] paths in self?.addPaths(paths) }
-        jobTable.onSelectionChanged = { [weak self] in self?.refreshAll() }
+        jobTable.onSelectionChanged = { [weak self] in
+            // 选中项决定波形画的是哪一个，所以选中变化也要重新取样
+            self?.refreshSourceInfo()
+            self?.refreshAll()
+        }
         jobTable.onDeleteRequested = { [weak self] in self?.deleteSelectedJobs() }
 
         layoutView.addSubview(jobTable.scrollView)
@@ -305,7 +393,7 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
         DITFrame(srcInfoLabel, x, y, w, 14)
         y += 14 + 14
 
-        // 2 · 提取区间
+        // 2 · 提取区间（下面接整段波形，选中的那一段会被标出来）
         DITPlaceSection(sec2Label, &y, x, w)
         DITFrame(startLabel, x, y + 3, 32, 18)
         DITFrame(startField, x + 36, y, 140, 24)
@@ -314,6 +402,15 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
         let wholeW: CGFloat = 130.0
         DITFrame(wholeBtn, x + w - wholeW, y, wholeW, 24)
         y += 24 + 8
+
+        // 波形要够高才看得出区间落在哪，但也不能把列表挤没了：按窗口高度分给它
+        DITFrame(waveCaption, x, y, w, 14)
+        y += 14 + 4
+
+        let wv = min(170.0, max(100.0, H - 620.0))
+        DITFrame(waveform, x, y, w, wv)
+        y += wv + 6
+
         // 长度与估算独占一行，不和按钮抢宽度
         DITFrame(lenLabel, x, y, w, 16)
         y += 16 + 4
@@ -460,6 +557,7 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
 
     @objc private func rangeEdited() {
         updateRangeInfo()
+        updateWaveformRange()
         saveDefaults()
     }
 
@@ -597,14 +695,21 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
     }
 
     private func refreshSourceInfo() {
-        guard let first = jobTable.jobs.first else {
+        guard let picked = jobTable.previewJob else {
             srcPath = nil
             srcDuration = 0
             srcInfoLabel.stringValue = "还没有选择文件 —— 把视频或音频拖到下面的列表，或点「添加文件…」"
             srcInfoLabel.textColor = NSColor.tertiaryLabelColor
+            waveCaption.stringValue = "整段波形会画在这里"
+            waveCaption.textColor = NSColor.tertiaryLabelColor
+            waveform.waveform = nil
+            waveform.placeholder = nil
+            waveState = "没有源文件"
+            updateWaveformRange()
             updateRangeInfo()
             return
         }
+        let first = picked.job
         srcPath = first.inputPath
         srcDuration = DITEngine.probeDuration(first.inputPath)
 
@@ -618,12 +723,126 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
             s += "　·　没有音频流，提取会失败"
         }
         if srcDuration > 0 { s += "　·　时长 \(DITEngine.timeStringFromSeconds(srcDuration))" }
-        if jobTable.jobs.count > 1 {
-            s += "　·　共 \(jobTable.jobs.count) 个文件，信息取第一个"
-        }
+        if jobTable.jobs.count > 1 { s += "　·　共 \(jobTable.jobs.count) 个文件" }
         srcInfoLabel.stringValue = s
         srcInfoLabel.textColor = NSColor.secondaryLabelColor
+
+        // 波形画的是哪一条要说清楚：列表里选中一个就画它，否则画第一个
+        var c = "波形：\(first.displayName)"
+        if picked.fromSelection {
+            c += "（列表里选中的那个）"
+        } else if jobTable.jobs.count > 1 {
+            c += "（列表第一个；选中某一行可以换）"
+        }
+        waveCaption.stringValue = c
+        waveCaption.textColor = NSColor.secondaryLabelColor
+
+        updateWaveformRange()
+        scheduleWaveform()
         updateRangeInfo()
+    }
+
+    // MARK: 波形预览
+
+    /// 把选中区间换算成 0..1 的比例交给波形视图。时间超界时夹到两端。
+    private func updateWaveformRange() {
+        guard srcDuration > 0, let range = currentRange(quiet: true) else {
+            waveform.startFraction = 0
+            waveform.endFraction = 1
+            return
+        }
+        waveform.startFraction = max(0.0, min(1.0, range.start / srcDuration))
+        let end = range.end ?? srcDuration
+        waveform.endFraction = max(0.0, min(1.0, end / srcDuration))
+    }
+
+    /// 生成整段波形图（ffmpeg 的 showwavespic）。
+    private func scheduleWaveform() {
+        waveToken += 1
+        let token = waveToken
+
+        guard let src = srcPath, !src.isEmpty else {
+            waveform.waveform = nil
+            waveform.placeholder = nil
+            waveState = "没有源文件"
+            return
+        }
+        guard DITEngine.probeAudioStream(src) != nil else {
+            waveform.waveform = nil
+            waveform.placeholder = "这个文件里没有音频流，画不出波形"
+            waveState = "没有音频流"
+            return
+        }
+        guard let ffmpeg = DITEngine.resolveTool("ffmpeg") else {
+            waveform.waveform = nil
+            waveform.placeholder = "找不到 ffmpeg，画不出波形"
+            waveState = "找不到 ffmpeg"
+            return
+        }
+
+        // 长素材只画前一段：画整段要把整个音轨解码一遍，为了一张缩略图不值得
+        let cap: Double = 20 * 60
+        let capped = srcDuration > cap
+
+        let out = (NSTemporaryDirectory() as NSString)
+            .appendingPathComponent("ditkit-waveform-\(token).png")
+        var args = ["-hide_banner", "-loglevel", "error"]
+        if capped { args += ["-t", String(cap)] }
+        args += ["-i", src,
+                 "-filter_complex", "showwavespic=s=1200x220:colors=0x4d8df0",
+                 "-frames:v", "1", "-y", out]
+
+        waveState = "生成中"
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // 不先删掉同名旧图的话，ffmpeg 没产出时会把残留当成这次的结果
+            try? FileManager.default.removeItem(atPath: out)
+
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: ffmpeg)
+            task.arguments = args
+            task.standardOutput = Pipe()
+            task.standardError = Pipe()
+            task.standardInput = FileHandle.nullDevice
+            var ok = true
+            do {
+                try task.run()
+            } catch {
+                ok = false
+            }
+            if ok {
+                task.waitUntilExit()
+                if task.terminationStatus != 0 { ok = false }
+            }
+            if ok && !FileManager.default.fileExists(atPath: out) { ok = false }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if self.waveToken != token { return }   // 已经有更新的请求了
+                self.waveform.waveform = ok ? NSImage(contentsOfFile: out) : nil
+                self.waveform.placeholder = ok ? nil : "画不出波形"
+                self.waveState = ok ? "ok" : "失败"
+                self.waveCaption.stringValue = capped
+                    ? "波形：\(self.srcPath.map { ($0 as NSString).lastPathComponent } ?? "")（只画了前 20 分钟）"
+                    : self.waveCaption.stringValue
+            }
+        }
+    }
+
+    /// 自检用：波形区当前状态一行
+    func previewLine() -> String {
+        guard let picked = jobTable.previewJob else { return "没有源文件" }
+        var s = "源=\(picked.job.displayName)（\(picked.fromSelection ? "选中" : "首个")）"
+        s += " 波形=\(waveState)"
+        if let range = currentRange(quiet: true) {
+            let end = range.end.map { DITEngine.timeStringFromSeconds($0) } ?? "结尾"
+            s += " 区间=\(DITEngine.timeStringFromSeconds(range.start))→\(end)"
+        } else {
+            s += " 区间=无效"
+        }
+        // 高亮带的实际绘制位置：区间比例算得对不对，从这几个数上一眼能看出来
+        s += String(format: " 带=%.1f+%.1f/%.1f",
+                    waveform.bandRect.minX, waveform.bandRect.width, waveform.bounds.width)
+        return s
     }
 
     @objc private func chooseFiles() {
@@ -691,6 +910,12 @@ final class PageAudio: NSObject, DITToolPage, NSTextFieldDelegate {
 
     func selectAllJobs() {
         jobTable.selectAllJobs()
+    }
+
+    func selectJob(at index: Int) {
+        jobTable.selectJob(at: index)
+        refreshSourceInfo()
+        refreshAll()
     }
 
     func simulateColumnResize(_ index: Int, delta: CGFloat) {

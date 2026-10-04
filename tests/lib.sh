@@ -208,9 +208,26 @@ image_size() {
     "$FFPROBE" -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$1" 2>/dev/null | head -1
 }
 
+# 视频流的 "宽,高"
+ffprobe_vsize() {
+    "$FFPROBE" -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$1" 2>/dev/null | head -1
+}
+
+# 视频流的 codec_tag_string（hvc1 之类的容器标签）
+ffprobe_tag() {
+    "$FFPROBE" -v error -select_streams v:0 -show_entries stream=codec_tag_string -of csv=p=0 "$1" 2>/dev/null | head -1
+}
+
 # 取某时刻一帧的均值 RGB，输出 "R G B"
 frame_rgb() {
     "$PYTHON" "$PROBE" frame "$1" "$2"
+}
+
+# 取某时刻一帧里某个矩形的均值 RGB，输出 "R G B"
+# 断言「图片铺在哪里」用它：整画面拉满、居中、还是只盖住右下角，各区域读数不同
+# 参数: <视频> <时刻> <x> <y> <宽> <高>
+region_rgb() {
+    "$PYTHON" "$PROBE" region "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
 # 取某时刻一帧，在时间码标尺调色板里找最接近的第几秒，输出 "序号 R G B 距离"
@@ -233,6 +250,61 @@ image_band() {
 # 用来区分「本次会话拿不到窗口合成（抓图全黑）」与「界面真的画错了」。
 image_uniform() {
     "$PYTHON" "$PROBE" uniform "$1"
+}
+
+# ---------- 遮罩合成 ----------
+# 期望值全部从「声明颜色」算出来，不抄观测读数：
+#   画面底色取自 solid.tsv，图片颜色取自 mask.tsv，两者都是生成端写下的真源。
+# 视频走的是 YUV 4:2:0 往返，读数会有一两个色阶的漂移，统一用容差吸收。
+
+# 画面底色（solid.mp4 的声明颜色）"R G B"
+base_rgb() {
+    read_rgb "$FIX/solid.tsv"
+}
+
+# 遮罩图片的声明颜色 "R G B"
+mask_rgb() {
+    awk -v n="$1" '$1 == n { print $2, $3, $4 }' "$FIX/mask.tsv"
+}
+
+# 半透明图片的 alpha（0..255）
+mask_alpha() {
+    awk -v n="$1" '$1 == n { print $2 }' "$FIX/mask_alpha.tsv"
+}
+
+# 逐通道线性插值：p=0 取 a，p=1 取 b
+rgb_lerp() {
+    awk -v a="$1" -v b="$2" -v p="$3" 'BEGIN {
+        split(a, x, " "); split(b, y, " ")
+        printf "%.0f %.0f %.0f", x[1]+(y[1]-x[1])*p, x[2]+(y[2]-x[2])*p, x[3]+(y[3]-x[3])*p
+    }'
+}
+
+# 正片叠底
+rgb_multiply() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        split(a, x, " "); split(b, y, " ")
+        printf "%.0f %.0f %.0f", x[1]*y[1]/255, x[2]*y[2]/255, x[3]*y[3]/255
+    }'
+}
+
+# 滤色
+rgb_screen() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+        split(a, x, " "); split(b, y, " ")
+        printf "%.0f %.0f %.0f", \
+            255-(255-x[1])*(255-y[1])/255, \
+            255-(255-x[2])*(255-y[2])/255, \
+            255-(255-x[3])*(255-y[3])/255
+    }'
+}
+
+# 遮罩用例的公共入口：跑一次 --cli --mask，产物写到 <目录>/<输出名>
+# 参数: <输出目录> <图片> <视频> [其余 --mask 选项...]
+run_mask() {
+    local out="$1" img="$2" src="$3"
+    shift 3
+    "$BIN" --cli --mask --image "$img" "$@" --out "$out" -- "$src" 2>&1
 }
 
 # ---------- 标尺 ----------
@@ -385,6 +457,31 @@ gui_busy() {
 
 gui_status() {
     printf '%s' "$1" | grep -m1 '运行态' | sed -n 's/.*状态行=//p'
+}
+
+# 从自检日志里取「预览    : 源=… 合成=ok」这一行。
+# 预览要等 ffmpeg 出图，抓图时机不好锁；把状态经诊断行暴露出来才好断言。
+gui_preview_line() {
+    printf '%s' "$1" | grep -m1 '^预览' || true
+}
+
+# 预览行里某个 "键=" 后面的值，例如 gui_preview_field "$line" 源 → solid.mp4（首个）
+# 字段以空格分隔，值一直取到下一个 "键=" 之前。
+gui_preview_field() {
+    printf '%s' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1
+}
+
+# 从诊断块的「当前页视图」里取某个子视图的矩形，输出 "x y w h"。
+# 取的是该行第一组 x=/y=/w=/h= —— 表格行末尾还会再报一次列宽，别被它带偏。
+# 用法：gui_subview_rect "$log" 'NSScrollView'
+gui_subview_rect() {
+    printf '%s' "$1" | grep -m1 -- "$2" \
+        | sed -n 's/.*x= *\([-0-9]*\) y= *\([-0-9]*\) w= *\([-0-9]*\) h= *\([-0-9]*\).*/\1 \2 \3 \4/p'
+}
+
+# 上面那份矩形的第 n 个分量（1=x 2=y 3=w 4=h）
+gui_rect_field() {
+    printf '%s' "$1" | cut -d' ' -f"$2"
 }
 
 # 界面自检需要窗口服务；纯 SSH / 后台会话下应当跳过而不是报错。

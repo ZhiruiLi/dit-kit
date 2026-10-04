@@ -56,6 +56,16 @@ DOMAIN_MAX 1.0 1.0 1.0
 EOF
 fi
 
+# 遮罩页演示用的图片：一个带透明度的居中方形，直接看得到「等比完整」的效果。
+# 用 format=rgba + colorchannelmixer 生成 —— color 滤镜不支持 c=0xRRGGBB@0.5 这种写法，
+# 那样得到的是不透明图。
+MASKIMG="$DEMO/徽标.png"
+if [ ! -s "$MASKIMG" ]; then
+    "$FFMPEG" -y -v error \
+        -f lavfi -i "color=c=0xFF7A1A:s=160x160" \
+        -vf "format=rgba,colorchannelmixer=aa=0.75" -frames:v 1 -pix_fmt rgba "$MASKIMG" || exit 1
+fi
+
 VIDS="$DEMO/in/片段 A.mp4|$DEMO/in/sub/片段 B.mp4"
 
 render() { # render <名称> <外观> <页号> <drop> [额外环境...]
@@ -82,10 +92,12 @@ render() { # render <名称> <外观> <页号> <drop> [额外环境...]
     fi
 }
 
-echo "==> 渲染 6 张界面截图到 $OUT/"
+echo "==> 渲染 8 张界面截图到 $OUT/"
 render ui-dark dark 0 "$VIDS"
 render ui-light light 0 "$VIDS"
 render trim-dark dark 1 "$VIDS" DITKIT_TRIM_START=00:00:03.000 DITKIT_TRIM_END=00:00:08.500
 render trim-light light 1 "$VIDS" DITKIT_TRIM_START=00:00:03.000 DITKIT_TRIM_END=00:00:08.500
 render audio-dark dark 2 "$VIDS" DITKIT_AUDIO_START=00:00:01.000 DITKIT_AUDIO_END=00:00:04.500
 render audio-light light 2 "$VIDS" DITKIT_AUDIO_START=00:00:01.000 DITKIT_AUDIO_END=00:00:04.500
+render mask-dark dark 3 "$VIDS" DITKIT_IMAGE="$MASKIMG" DITKIT_OVERLAY_FIT=contain
+render mask-light light 3 "$VIDS" DITKIT_IMAGE="$MASKIMG" DITKIT_OVERLAY_FIT=contain

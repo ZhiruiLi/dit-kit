@@ -417,9 +417,26 @@ final class DITJobTable: NSObject {
         table.selectedRowIndexes.compactMap { $0 < jobs.count ? jobs[$0] : nil }
     }
 
+    /// 预览该用哪一条：列表里**唯一选中**的那一条优先，否则退回第一条。
+    ///
+    /// 选中多条时不算「指定了某一个」，所以退回第一条 —— 规格不同的素材之间比较时
+    /// 会一直跳，不如给一个稳定的默认。第二个返回值是给界面说明「为什么是它」用的。
+    var previewJob: (job: DITJob, fromSelection: Bool)? {
+        let sel = selectedJobs
+        if sel.count == 1 { return (sel[0], true) }
+        guard let first = jobs.first else { return nil }
+        return (first, false)
+    }
+
     /// 全选（自检与「删除选中」配合用）
     func selectAllJobs() {
         table.selectAll(nil)
+    }
+
+    /// 选中第 index 行（自检用：验证「选中的那一条才被预览」）
+    func selectJob(at index: Int) {
+        if index < 0 || index >= jobs.count { return }
+        table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
     }
 
     /// 删除选中项，返回实际删掉的条数
@@ -679,10 +696,14 @@ final class DITActionBar: NSObject {
     @objc optional func beginStop()
     /// 全选列表里的条目（自检用）
     @objc optional func selectAllJobs()
+    /// 选中第 index 行（自检用）
+    @objc optional func selectJob(at index: Int)
     /// 删除列表里选中的条目（等价于点「删除选中」按钮；自检用）
     @objc optional func deleteSelectedJobs()
     /// 自检用：模拟拖动列表的列分隔条（把第 index 列加宽 delta）
     @objc optional func simulateColumnResize(_ index: Int, delta: CGFloat)
     /// 状态行当前文字（自检断言用）
     @objc optional func statusLine() -> String
+    /// 预览区当前状态的一行说明（自检断言用）；没有预览的页面不实现
+    @objc optional func previewLine() -> String
 }

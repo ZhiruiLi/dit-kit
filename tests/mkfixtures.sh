@@ -125,6 +125,18 @@ build_tone_ruler "$FIX/tone_ruler.mp4" 320 180 30 6
     -c:v libx264 -preset veryfast -crf 12 -pix_fmt yuv420p \
     -c:a aac -b:a 96k -shortest "$FIX/solid.mp4"
 
+# 没有音频流的素材：验证「源里没有声音」这条路 ——
+# 音频页要给出一条说明而不是空白波形，音频提取要报失败而不是静悄悄成功。
+"$FFMPEG" -y -v error \
+    -f lavfi -i "color=c=0x204060:s=160x90:r=25:d=2" \
+    -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p "$FIX/silent.mp4"
+
+# 有细节的素材：编码质量这类断言要它才有分辨力。
+# 纯色画面下任何质量档都只占几百字节，编码器早就触底，比不出高低。
+"$FFMPEG" -y -v error \
+    -f lavfi -i "testsrc2=size=320x180:rate=25:duration=3" \
+    -c:v libx264 -preset veryfast -crf 8 -pix_fmt yuv420p "$FIX/detail.mp4"
+
 # 长素材：停更测试用。内容无所谓，但必须够大够长，保证一个任务不会在
 # 1~2 秒内跑完，否则构造不出「1 个在跑、N 个排队」的场景。
 "$FFMPEG" -y -v error \
@@ -170,8 +182,47 @@ EOF
 # 纯色素材的实际颜色（供断言端读取）
 printf '128\t64\t32\n' >"$FIX/solid.tsv"
 
-for f in ruler_a.mp4 ruler_b.mp4 tone_ruler.mp4 tone_ruler.m4a solid.mp4 long.mp4 \
-    swap.cube identity.cube colors.tsv band.txt tones.txt; do
+# ---------- 遮罩用图片 ----------
+# 遮罩断言要能「从素材推出期望值」，而不是把观测到的一串数字抄进用例。
+# 所以这里生成的全是可精确算出来的图：满幅纯色、半透明纯色、小尺寸纯色。
+# 期望值由 mask.tsv 里的声明颜色线性组合而来（见 tests/lib.sh 的 rgb_* 系列）。
+#
+# 生成半透明图有个坑：color 滤镜不接受 c=0xFF0000@0.5 这种写法（会得到不透明），
+# 必须显式走 format=rgba + colorchannelmixer，并且用 -pix_fmt rgba 落地。
+mask_png() { # mask_png <输出> <宽> <高> <色值> [alpha 0..1]
+    local out="$1" w="$2" h="$3" c="$4" a="${5:-}"
+    if [ -z "$a" ] || [ "$a" = "1" ]; then
+        "$FFMPEG" -y -v error -f lavfi -i "color=c=${c}:s=${w}x${h}" -frames:v 1 "$out"
+    else
+        "$FFMPEG" -y -v error -f lavfi -i "color=c=${c}:s=${w}x${h}" \
+            -vf "format=rgba,colorchannelmixer=aa=${a}" -frames:v 1 -pix_fmt rgba "$out"
+    fi
+}
+
+mask_png "$FIX/ov_full_red.png" 320 180 0xFF0000
+mask_png "$FIX/ov_full_white.png" 320 180 0xFFFFFF
+mask_png "$FIX/ov_full_gray.png" 320 180 0x808080
+mask_png "$FIX/ov_full_black.png" 320 180 0x000000
+mask_png "$FIX/ov_half_red.png" 320 180 0xFF0000 0.5
+mask_png "$FIX/ov_small_green.png" 40 40 0x00FF00
+
+# 图片的声明颜色（真源）。故意写成「准确的颜色值」而不是「探测到的读数」：
+# 探测读数会带上 YUV 往返的漂移，断言端统一用 expect_rgb_near 的容差吸收。
+cat >"$FIX/mask.tsv" <<'EOF'
+ov_full_red	255	0	0
+ov_full_white	255	255	255
+ov_full_gray	128	128	128
+ov_full_black	0	0	0
+ov_half_red	255	0	0
+ov_small_green	0	255	0
+EOF
+# 半透明图额外记一个 alpha（0..255），断言端要拿它算叠加比例
+printf 'ov_half_red\t128\n' >"$FIX/mask_alpha.tsv"
+
+for f in ruler_a.mp4 ruler_b.mp4 tone_ruler.mp4 tone_ruler.m4a solid.mp4 silent.mp4 detail.mp4 long.mp4 \
+    swap.cube identity.cube colors.tsv band.txt tones.txt \
+    ov_full_red.png ov_full_white.png ov_full_gray.png ov_full_black.png \
+    ov_half_red.png ov_small_green.png mask.tsv mask_alpha.tsv; do
     [ -s "$FIX/$f" ] || {
         echo "生成失败: $f" >&2
         exit 1

@@ -6,8 +6,10 @@
 //    · DITOutputOptions 输出路径 / 命名冲突 / 并发数 / 扩展名过滤
 //    · DITEngine        并发执行器：调度 ffmpeg 子进程、解析进度、汇报状态
 //
-//  具体工具（LUT 调色、视频裁剪）通过 argumentsBuilder 回调提供自己的 ffmpeg 参数，
+//  具体工具通过 argumentsBuilder 回调提供自己的 ffmpeg 参数，
 //  所以新增一个工具不需要动这个文件。
+//
+//  另外这里也放着与具体工具无关的 ffprobe 探测（时长 / 画面尺寸 / 音视频流概况）。
 //
 //  自检输出里的每一行都被测试用例断言着，改文案就等于改契约。
 //
@@ -80,7 +82,8 @@ final class DITOutputOptions {
     }
 }
 
-/// 把任务翻译成 ffmpeg 参数：必须自带 `-i <输入>`，但不要带输出文件名（引擎会补）
+/// 把任务翻译成 ffmpeg 参数：自带 `-i <输入>`（需要第二路输入的工具可以再补一个 `-i`），
+/// 但不要带输出文件名（引擎会补）
 typealias DITArgsBuilder = (DITJob, String) -> [String]
 
 // MARK: - 内部任务盒子
@@ -657,6 +660,17 @@ extension DITEngine {
                                    "-of", "default=nw=1:nk=1", path]) else { return 0 }
         let v = (s as NSString).doubleValue
         return (v.isFinite && v > 0) ? v : 0
+    }
+
+    /// 首个视频流的画面尺寸；没有视频流或读不出来时返回 nil
+    static func probeVideoSize(_ path: String) -> (w: Int, h: Int)? {
+        guard let s = probeOutput(["-v", "error", "-select_streams", "v:0",
+                                   "-show_entries", "stream=width,height",
+                                   "-of", "default=nw=1", path]) else { return nil }
+        let kv = keyValues(s)
+        let w = ((kv["width"] ?? "") as NSString).integerValue
+        let h = ((kv["height"] ?? "") as NSString).integerValue
+        return (w > 0 && h > 0) ? (w, h) : nil
     }
 
     /// 首个音频流的概况；没有音频流时返回 nil

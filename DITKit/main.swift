@@ -3,7 +3,8 @@
 //
 //  DITKit 是个视频工具箱：主窗口只负责标题栏、ffmpeg 状态和工具页切换，
 //  每个具体功能都是一个独立的 DITToolPage（见 PageLUT.swift / PageTrim.swift /
-//  PageAudio.swift）。要加新工具，写一个新的 Page 类、在这里的 pages 数组里挂上即可。
+//  PageAudio.swift / PageMask.swift）。要加新工具，写一个新的 Page 类、
+//  在这里的 pages 数组里挂上即可。
 //
 
 import AppKit
@@ -65,6 +66,52 @@ private func DITCaptureWindow(_ win: NSWindow) -> NSBitmapImageRep? {
         return nil
     }
     return NSBitmapImageRep(cgImage: img)
+}
+
+/// 借系统的 screencapture 抓同一扇窗。
+/// 它用的是调用方的录屏权限，跟本进程的签名无关，所以本进程没被授权时这条路仍然通。
+private func DITCaptureByScreencapture(_ win: NSWindow) -> NSBitmapImageRep? {
+    let bin = "/usr/sbin/screencapture"
+    guard win.windowNumber > 0,
+          FileManager.default.isExecutableFile(atPath: bin) else { return nil }
+    let tmp = (NSTemporaryDirectory() as NSString)
+        .appendingPathComponent("ditkit-shot-\(win.windowNumber).png")
+    try? FileManager.default.removeItem(atPath: tmp)
+
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: bin)
+    task.arguments = ["-o", "-x", "-l", String(win.windowNumber), tmp]
+    task.standardInput = FileHandle.nullDevice
+    task.standardOutput = Pipe()
+    task.standardError = Pipe()
+    guard (try? task.run()) != nil else { return nil }
+    task.waitUntilExit()
+    guard task.terminationStatus == 0,
+          let data = FileManager.default.contents(atPath: tmp),
+          let rep = NSBitmapImageRep(data: data) else { return nil }
+    return rep
+}
+
+/// 抓到的位图是不是一整张同色。系统拒绝窗口合成时会给回一张空白图，
+/// 这种图写出去只会让人以为界面本来就是空的，所以要认出来往下退。
+/// 隔点采样即可：真界面哪怕再素，顶栏、按钮和分隔线也凑得出两种颜色。
+private func DITImageIsFlat(_ rep: NSBitmapImageRep) -> Bool {
+    let w = rep.pixelsWide, h = rep.pixelsHigh
+    guard w > 0, h > 0 else { return true }
+    let stepX = max(1, w / 16), stepY = max(1, h / 16)
+    var first: NSColor?
+    for y in stride(from: 0, to: h, by: stepY) {
+        for x in stride(from: 0, to: w, by: stepX) {
+            guard let c = rep.colorAt(x: x, y: y) else { continue }
+            guard let f = first else { first = c; continue }
+            if abs(c.redComponent - f.redComponent) > 0.01
+                || abs(c.greenComponent - f.greenComponent) > 0.01
+                || abs(c.blueComponent - f.blueComponent) > 0.01 {
+                return false
+            }
+        }
+    }
+    return true
 }
 
 // MARK: - 主控制器
@@ -137,6 +184,14 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
 
+        // DITKIT_MASK_DROP：模拟把文件拖进遮罩图片拖放区（同样用来验证后缀名过滤）
+        if let maskDrop = env["DITKIT_MASK_DROP"] {
+            let page = pages[currentPage]
+            if let mask = page as? PageMask {
+                _ = mask.simulateMaskDrop(maskDrop.components(separatedBy: "|"))
+            }
+        }
+
         // DITKIT_COLUMN_DRAG=<列号>:<加宽量>：模拟拖一次列分隔条，随后再走一遍布局 ——
         // 用户调过的列宽不该被「按容器宽度自动分配」抹掉
         if let colDrag = env["DITKIT_COLUMN_DRAG"] {
@@ -149,11 +204,18 @@ final class AppController: NSObject, NSApplicationDelegate {
             }
         }
 
-        // DITKIT_LIST_ACTION=select-all|delete|delete-all：驱动列表的选中与删除
+        // DITKIT_LIST_ACTION：驱动列表的选中与删除。取值
+        //   select-all        全选
+        //   select:<行号>      选中第 N 行（0 起）—— 用来验证「预览取的是选中的那一条」
+        //   delete            删除当前选中
+        //   delete-all        全选后删除
         if let act = env["DITKIT_LIST_ACTION"] {
             let page = pages[currentPage]
             if act == "select-all" || act == "delete-all" {
                 page.selectAllJobs?()
+            } else if act.hasPrefix("select:") {
+                let idx = ((act as NSString).substring(from: 7) as NSString).integerValue
+                page.selectJob?(at: idx)
             }
             if act.hasPrefix("delete") {
                 page.deleteSelectedJobs?()
@@ -224,16 +286,26 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func captureSelf(_ path: String) {
-        // 优先按窗口抓图：cacheDisplayInRect 抓不到 layer-backed 的顶层控件（标题、切换条）
-        // DITKIT_SHOT_VIEWCACHE=1 可强制走视图缓存路径，便于对比两种抓图的效果
+        // 三条抓图路径，按画面完整程度往下退：
+        //   1. 本进程窗口合成 —— 最全，含标题栏与 layer-backed 控件
+        //   2. screencapture -l —— 本进程没被授权时仍然可用，画质与 1 相同
+        //   3. 视图缓存 —— 兜底，抓不到 layer-backed 控件的文字与底色
+        // DITKIT_SHOT_VIEWCACHE=1 可强制走第 3 条，便于对比两种抓图的效果
         var rep: NSBitmapImageRep?
+        var how = ""
         if ProcessInfo.processInfo.environment["DITKIT_SHOT_VIEWCACHE"] == nil {
-            rep = DITCaptureWindow(window)
+            if let r = DITCaptureWindow(window), !DITImageIsFlat(r) {
+                rep = r
+                how = "窗口合成"
+            } else if let r = DITCaptureByScreencapture(window), !DITImageIsFlat(r) {
+                rep = r
+                how = "screencapture -l"
+            }
         }
         if let r = rep {
-            print("抓图方式: 窗口合成 (\(r.pixelsWide)x\(r.pixelsHigh))")
+            print("抓图方式: \(how) (\(r.pixelsWide)x\(r.pixelsHigh))")
         } else {
-            print("抓图方式: 视图缓存回退（窗口合成不可用）")
+            print("抓图方式: 视图缓存回退（窗口合成与 screencapture 都没拿到画面）")
             let bounds = root.bounds
             if let r = root.bitmapImageRepForCachingDisplay(in: bounds) {
                 root.cacheDisplay(in: bounds, to: r)
@@ -274,6 +346,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         // 当前页的运行态：自检用它断言「停止后是否真的收尾了」
         let cur = pages[currentPage]
         print("运行态  : busy=\(cur.busy ? 1 : 0)  状态行=\(cur.statusLine?() ?? "(未实现)")")
+        print("预览    : \(cur.previewLine?() ?? "(未实现)")")
 
         print("顶层子视图:")
         for v in root.subviews {
@@ -396,7 +469,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         topBar.addSubview(ffmpegLabel)
 
         // 工具页切换
-        pages = [PageLUT(), PageTrim(), PageAudio()]
+        pages = [PageLUT(), PageTrim(), PageAudio(), PageMask()]
         pageSwitch = NSSegmentedControl(frame: .zero)
         pageSwitch.segmentCount = pages.count
         for (i, p) in pages.enumerated() {
@@ -468,23 +541,27 @@ private func PrintUsage() {
     text += "  DITKit                                 打开图形界面\n"
     text += "  DITKit --cli --lut  <LUT> [选项] -- <视频...>    批量套 LUT\n"
     text += "  DITKit --cli --trim --end <时间> [选项] -- <视频...>   裁剪片段\n"
-    text += "  DITKit --cli --audio [--start <时间>] [--end <时间>] [选项] -- <文件...>   提取音频\n\n"
+    text += "  DITKit --cli --audio [--start <时间>] [--end <时间>] [选项] -- <文件...>   提取音频\n"
+    text += "  DITKit --cli --mask --image <图片> [选项] -- <视频...>   图片遮罩\n\n"
     text += "LUT 模式:\n" + PageLUT.cliUsage + "\n"
     text += "裁剪模式:\n" + PageTrim.cliUsage + "\n"
-    text += "音频提取模式:\n" + PageAudio.cliUsage
+    text += "音频提取模式:\n" + PageAudio.cliUsage + "\n"
+    text += "图片遮罩模式:\n" + PageMask.cliUsage
     FileHandle.standardError.write(Data(text.utf8))
 }
 
 private func RunCLI(_ args: [String]) -> Int32 {
-    var wantsLUT = false, wantsTrim = false, wantsAudio = false
+    var wantsLUT = false, wantsTrim = false, wantsAudio = false, wantsMask = false
     for a in args {
         if a == "--lut" { wantsLUT = true }
         if a == "--trim" { wantsTrim = true }
         if a == "--audio" { wantsAudio = true }
+        if a == "--mask" { wantsMask = true }
     }
     if wantsLUT { return PageLUT.runCLI(args) }
     if wantsTrim { return PageTrim.runCLI(args) }
     if wantsAudio { return PageAudio.runCLI(args) }
+    if wantsMask { return PageMask.runCLI(args) }
     PrintUsage()
     return 2
 }

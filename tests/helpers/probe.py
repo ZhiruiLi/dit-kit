@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """测试用的像素探针。只依赖标准库，任何 python3 都能跑。
 
-四个子命令：
+五个子命令：
 
   frame   <视频> <时刻>                 取该时刻一帧的均值 RGB，输出 "R G B"
+  region  <视频> <时刻> <x> <y> <宽> <高>  取该帧某个矩形区域的平均 RGB，输出 "R G B"
+                                        （用来断言「图片铺在哪里」：整画面拉了、居中了、
+                                          还是只盖住了右下角）
   nearest <视频> <时刻> <colors.tsv>    在标尺调色板里找最接近的颜色，
                                         输出 "序号 R G B 距离"
   band    <图片> <y0> <y1>              判断图片的 [y0,y1) 像素行区间里有没有内容，
@@ -11,6 +14,9 @@
   uniform <图片>                        整张图是否只有一个颜色，输出 "uniform" 或 "varied"
                                         （用来区分「窗口合成拿不到，抓图全黑」这种
                                           环境限制，与「界面真的画错了」）
+
+frame 与 region 都是缩到 1x1 再读原始 RGB，所以对纯色区域得到的就是精确均值；
+参数里带时刻，图片文件同样能用（把时刻写 0）。
 """
 
 import os
@@ -29,6 +35,23 @@ def frame_rgb(video, ts):
     r = run([
         FFMPEG, "-v", "error", "-ss", str(ts), "-i", video,
         "-frames:v", "1", "-vf", "scale=1:1",
+        "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+    ])
+    if len(r.stdout) < 3:
+        return None
+    return tuple(r.stdout[:3])
+
+
+def region_rgb(path, ts, x, y, w, h):
+    """取一帧里某个矩形区域的平均 RGB。先 crop 再缩到 1x1，得到的就是该区域均值。
+
+    这是断言「图片铺在哪里」的手段：整画面都拉满、还是只盖住中间或右下角，
+    不同区域的读数会明显不同。
+    """
+    r = run([
+        FFMPEG, "-v", "error", "-ss", str(ts), "-i", path,
+        "-frames:v", "1",
+        "-vf", "crop=%d:%d:%d:%d,scale=1:1" % (w, h, x, y),
         "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
     ])
     if len(r.stdout) < 3:
@@ -115,6 +138,17 @@ def main(argv):
 
     if cmd == "frame":
         rgb = frame_rgb(argv[2], argv[3])
+        if rgb is None:
+            print("读取失败", file=sys.stderr)
+            return 1
+        print("%d %d %d" % rgb)
+        return 0
+
+    if cmd == "region":
+        if len(argv) < 8:
+            print(__doc__, file=sys.stderr)
+            return 2
+        rgb = region_rgb(argv[2], argv[3], *(int(v) for v in argv[4:8]))
         if rgb is None:
             print("读取失败", file=sys.stderr)
             return 1

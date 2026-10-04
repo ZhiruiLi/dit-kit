@@ -91,6 +91,11 @@ c_renders_both_pages() {
     png=$(render audio-page 2 dark DITKIT_AUDIO_START=00:00:01 DITKIT_AUDIO_END=00:00:03)
     require_capture "$png"
     expect_window_width "$png"
+
+    png=$(render mask-page 3 dark \
+        DITKIT_IMAGE="$FIX/ov_small_green.png" DITKIT_OVERLAY_FIT=contain)
+    require_capture "$png"
+    expect_window_width "$png"
 }
 
 c_renders_light_theme() {
@@ -130,7 +135,7 @@ c_diagnostics_sane() {
         DITKIT_APPEARANCE=dark DITKIT_PAGE=0 \
         DITKIT_LUT="$FIX/identity.cube" DITKIT_DROP="$FIX/ruler_a.mp4")
     gui_ran "$log" || skip "自检没能启动"
-    expect_contains "$log" "工具页  : 3 个" "工具页数量"
+    expect_contains "$log" "工具页  : 4 个" "工具页数量"
     expect_contains "$log" "窗口    : " "窗口诊断"
     subs=$(printf '%s' "$log" | sed -n 's/.*子视图 \([0-9]*\) 个.*/\1/p' | head -1)
     expect_ge "$subs" 10 "LUT 页子视图数（界面确实搭起来了）"
@@ -186,8 +191,130 @@ c_audio_page_works() {
     expect_contains "$log" "aac 48kHz 单声道" "源信息应当报出音频流概况"
 }
 
-# ---------- 任务列表：把诊断行拆成可断言的小块 ----------
-# 列表那行长这样：
+# 遮罩页：渲染有内容、合成静帧真的出图、诊断行报出用的是哪张图
+c_mask_page_works() {
+    gui_available || skip "当前会话没有图形界面"
+    local png log line
+    png=$(render mask-body 3 dark \
+        DITKIT_IMAGE="$FIX/ov_small_green.png" DITKIT_OVERLAY_FIT=contain)
+    require_capture "$png"
+    expect_eq "content" "$(image_band "$png" 70 200)" "遮罩页顶栏区间应当有内容"
+    expect_eq "content" "$(image_band "$png" 260 700)" "遮罩页主体区间应当有内容"
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/mask-info.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=3 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/ruler_a.mp4" DITKIT_IMAGE="$FIX/ov_small_green.png")
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" "[3] 图片遮罩" "页切换器上应当有遮罩页"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "遮罩=ov_small_green.png" "诊断行应当报出用的哪张图"
+    expect_contains "$line" "构图=stretch/normal/100" "默认应当是拉伸铺满、普通混合、100%"
+    expect_eq "ok" "$(gui_preview_field "$line" 合成)" "合成静帧应当成功"
+
+    # 没选图片时也给一张源画面，而不是一片空白
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/mask-noimage.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=3 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/ruler_a.mp4")
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "遮罩=无" "没选图时应当说明没有遮罩"
+    expect_eq "ok" "$(gui_preview_field "$line" 合成)" "没选图时也该给一张源画面"
+}
+
+# 预览源规则：批量时默认取列表里第一个，只有唯一选中项时才换成选中的那个。
+#
+# 列表是按文件名词典序排的（不是拖入顺序），所以这里故意按 b、a 的顺序拖入：
+# 预览取到 a 才说明它取的是「列表第一行」，而不是「第一个拖进来的」。
+c_preview_source_follows_selection() {
+    gui_available || skip "当前会话没有图形界面"
+    local log line
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/preview-first.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=3 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/ruler_b.mp4|$FIX/ruler_a.mp4" \
+        DITKIT_IMAGE="$FIX/ov_full_red.png")
+    gui_ran "$log" || skip "自检没能启动"
+    expect_eq "2" "$(gui_rows "$(gui_list_line "$log")")" "拖入两个文件后的列表行数"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "源=ruler_a.mp4（首个）" "没有选中时取列表第一个（与拖入顺序无关）"
+    expect_eq "ok" "$(gui_preview_field "$line" 合成)" "预览应当合成成功"
+
+    # 只有唯一选中项时，预览换成它
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/preview-select.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=3 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/ruler_b.mp4|$FIX/ruler_a.mp4" \
+        DITKIT_IMAGE="$FIX/ov_full_red.png" DITKIT_LIST_ACTION=select:1)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "源=ruler_b.mp4（选中）" "唯一选中项应当优先被预览"
+    note "  选中第 1 行: $line"
+}
+
+# 选中多行不算「指定了一个」：退回列表第一个
+c_preview_ignores_multi_selection() {
+    gui_available || skip "当前会话没有图形界面"
+    local log line
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/preview-multi.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=3 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/ruler_b.mp4|$FIX/ruler_a.mp4" \
+        DITKIT_IMAGE="$FIX/ov_full_red.png" DITKIT_LIST_ACTION=select-all)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "源=ruler_a.mp4（首个）" "全选时应当退回列表第一个"
+}
+
+# 音频页同样有预览：波形 + 选中区间高亮，且源跟着选中走
+c_audio_page_previews_waveform() {
+    gui_available || skip "当前会话没有图形界面"
+    local log line
+
+    # 故意按 mp4、m4a 的顺序拖入：列表按文件名字典序排，首个是 m4a，
+    # 取到 m4a 才说明「首个」指的是列表第一行而不是第一个拖进来的。
+    # （m4a 是纯音频输入，顺带覆盖「音频进、波形出」）
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/wave.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=2 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/tone_ruler.mp4|$FIX/tone_ruler.m4a" \
+        DITKIT_AUDIO_START=00:00:01 DITKIT_AUDIO_END=00:00:03)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "源=tone_ruler.m4a（首个）" "没有选中时取列表第一个（与拖入顺序无关）"
+    expect_eq "ok" "$(gui_preview_field "$line" 波形)" "波形应当画出来了"
+    expect_contains "$line" "区间=00:00:01.000→00:00:03.000" "诊断行应当报出选中的区间"
+    # 6 秒素材取 1→3 秒，高亮带应当从 1/6 处开始、宽 1/3（容器宽 668）
+    expect_near "112" "$(printf '%s' "$line" | sed -n 's/.*带=\([0-9.]*\)+.*/\1/p')" 3 \
+        "高亮带起点"
+    expect_near "223" "$(printf '%s' "$line" | sed -n 's/.*带=[0-9.]*+\([0-9.]*\)\/.*/\1/p')" 3 \
+        "高亮带宽度"
+
+    # 源跟着选中走。
+    # 注意列表是按文件名字典序排的（不是拖入顺序）：「tone_ruler.m4a」排在
+    # 「tone_ruler.mp4」前面，所以第 0 行是 m4a、第 1 行是 mp4。
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/wave-select.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=2 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/tone_ruler.mp4|$FIX/tone_ruler.m4a" \
+        DITKIT_AUDIO_START=00:00:01 DITKIT_AUDIO_END=00:00:03 DITKIT_LIST_ACTION=select:1)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "源=tone_ruler.mp4（选中）" "唯一选中项应当优先画波形"
+
+    # 没有音频流时明确说明，而不是给一条空白的波形
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/wave-none.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=2 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/silent.mp4")
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_preview_line "$log")
+    expect_contains "$line" "波形=没有音频流" "没有音频流时应当说明原因"
+}
+
+# ---------- 任务列表：把诊断行拆成可断言的小块 ----------# 列表那行长这样：
 #   NSScrollView  x=18 y=491 w=668 h=145  rows=0 w=[224,287,145] mask=[2,3,2]
 # rows 用来断言增删；w 是列宽（拖分隔条会变）；mask 是列的 resizingMask，
 # 值里带 NSTableColumnUserResizingMask(=2) 这一位才拖得动。
@@ -324,7 +451,7 @@ c_column_divider_is_draggable_and_sticky() {
     expect_eq "3" "$i" "参与检查的列数"
 }
 
-# 拖入区与列表合并后：列表自己就是拖入目标，页面上不该再多一个拖放框
+# 列表自己就是拖入目标：每个工具页上只该有这一个拖放框
 c_list_is_the_only_drop_target() {
     gui_available || skip "当前会话没有图形界面"
     local log line wells
@@ -349,13 +476,62 @@ c_list_is_the_only_drop_target() {
     expect_eq "1" "$wells" "LUT 页只应保留 LUT 拖放框"
 }
 
+# 遮罩页是控件最多的页，预览和文件列表抢同一段竖直空间。
+# 这里盯住分配结果：预览要够大、列表要够放下表头两行、而且谁都不能压住底部操作栏。
+c_mask_page_layout_reserves_room() {
+    gui_available || skip "当前会话没有图形界面"
+    local log pageH pv list status btn
+    local pvY pvH listY listH statusY btnY
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/mask-layout.log" \
+        DITKIT_APPEARANCE=dark DITKIT_PAGE=3 DITKIT_SHOT_DELAY=2.5 \
+        DITKIT_DROP="$FIX/ruler_a.mp4|$FIX/solid.mp4" \
+        DITKIT_IMAGE="$FIX/ov_small_green.png")
+    gui_ran "$log" || skip "自检没能启动"
+
+    pageH=$(printf '%s' "$log" | sed -n 's/.*LayoutView *[0-9]* x \([0-9]*\).*/\1/p' | head -1)
+    expect_ge "$pageH" "600" "页面可用高度"
+
+    # 预览：合成静帧要看得清，给不到 96 就成了摆设
+    pv=$(gui_subview_rect "$log" 'NSImageView')
+    pvY=$(gui_rect_field "$pv" 2)
+    pvH=$(gui_rect_field "$pv" 4)
+    expect_ge "$pvH" "96" "预览静帧高度"
+
+    # 列表：表头加两行，低于 80 就会出现半行被裁
+    list=$(gui_subview_rect "$log" 'NSScrollView')
+    listY=$(gui_rect_field "$list" 2)
+    listH=$(gui_rect_field "$list" 4)
+    expect_ge "$listH" "80" "文件列表高度"
+
+    # 列表底边不能碰到底部操作栏的状态行
+    status=$(gui_subview_rect "$log" 'NSTextField.*"就绪"')
+    statusY=$(gui_rect_field "$status" 2)
+    expect_ne "" "$statusY" "应当能在诊断里找到状态行"
+    expect_ge "$((statusY - listY - listH))" "1" "列表底边到状态行的间隙"
+
+    # 整页也不该溢出：最下面那个按钮连同 18pt 页边距要落在页面里
+    btn=$(gui_subview_rect "$log" 'NSButton.*"开始合成"')
+    btnY=$(gui_rect_field "$btn" 2)
+    expect_le "$((btnY + 30 + 18))" "$pageH" "底部按钮栏未溢出页面"
+
+    # 预览在列表上方，两者不该交叠
+    expect_le "$((pvY + pvH))" "$listY" "预览底边在列表上方"
+}
+
 reg \
-    "三个工具页都能渲染出图"            c_renders_both_pages \
+    "四个工具页都能渲染出图"            c_renders_both_pages \
     "浅色主题也能渲染"                  c_renders_light_theme \
     "顶栏（标题与页切换器）真的画出来了" c_top_bar_has_content \
     "页面主体真的画出来了"              c_page_body_has_content \
     "裁剪页也画得有内容"                c_trim_page_has_content \
     "音频页也画得有内容且列表可用"       c_audio_page_works \
+    "遮罩页也画得有内容，合成静帧出图"    c_mask_page_works \
+    "遮罩页给预览和列表各留出空间"        c_mask_page_layout_reserves_room \
+    "预览源跟着唯一选中项走"            c_preview_source_follows_selection \
+    "选中多行不算指定一个"              c_preview_ignores_multi_selection \
+    "音频页有波形与区间高亮预览"         c_audio_page_previews_waveform \
     "自检诊断信息正常"                  c_diagnostics_sane \
     "干净偏好下能正常启动"              c_starts_with_fresh_preferences \
     "LUT 拖入会挡掉错误的后缀名"         c_lut_drop_rejects_wrong_extension \
@@ -363,4 +539,4 @@ reg \
     "LUT 拖入会挡掉文件夹"               c_lut_drop_rejects_folder \
     "列表能选中并删除条目"              c_list_delete_selected \
     "列分隔条能拖，且拖后不被覆盖"       c_column_divider_is_draggable_and_sticky \
-    "拖入区已与列表合并"                c_list_is_the_only_drop_target
+    "列表是页面上唯一的拖入区"           c_list_is_the_only_drop_target
