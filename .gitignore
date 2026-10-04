@@ -1,0 +1,11 @@
+# 编译产物（用 ./build.sh 重新生成，不入库）
+build/
+
+# macOS 系统文件
+.DS_Store
+._*
+
+# clang / Xcode 中间文件
+*.o
+*.dSYM/
+DerivedData/
