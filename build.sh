@@ -14,9 +14,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 echo "==> 编译"
 # 源文件用通配符收集，新增工具页不用改这个脚本。
 #
-# -swift-version 5：用 Swift 5 语言模式。Swift 6 的严格并发检查会要求把整套
-#   Process + DispatchQueue + 回调改写成 async/await，并给跨线程共享的状态标
-#   Sendable —— 那是另一场重构，和这次「换成 Swift 写」是两件事，真要做得单独开一版。
+# -swift-version 5：用 Swift 5 语言模式。这套代码的并发模型是 Process + DispatchQueue
+#   + 回调；Swift 6 的严格并发检查会要求把它们改写成 async/await 并给跨线程共享的
+#   状态标 Sendable —— 那是在换并发模型，不是换写法，真要做得单独开一版。
 #
 # -whole-module-optimization：多文件当成一个模块一次性编译，省编译时间，
 #   也不给跨文件调用留未优化边界。

@@ -479,7 +479,7 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
         lenLabel.stringValue = "片段长度 \(DITEngine.timeStringFromSeconds(e - s))"
 
         // 「超出源时长」这句放不进长度标签 —— 那一排只给它一百多点宽，右边还杵着
-        // 「用完整时长」按钮。所以警告改挂到下面整行宽的提示上，顺手改成橙色让它显眼。
+        // 「用完整时长」按钮。所以警告挂在下面整行宽的提示上，并用橙色以示显眼。
         if srcDuration > 0 && e > srcDuration + 0.05 {
             let src = DITEngine.timeStringFromSeconds(srcDuration)
             lenLabel.toolTip = "终点超出源时长 \(src)，实际会截断到结尾"
@@ -522,8 +522,8 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
 
         // 抽帧是 IO + 解码，放到后台，避免拖住界面
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // 先删掉同名的旧图：时间段超出源时长时 ffmpeg 不产出文件、
-            // 却仍然退出 0，只看退出码会把上一轮残留的帧当成这一轮的结果。
+            // 时间段超出源时长时，ffmpeg 不产出文件却仍退出 0 —— 不先删掉同名旧图，
+            // 下面就会把残留文件当成这次的取帧结果。
             try? FileManager.default.removeItem(atPath: out)
 
             let task = Process()

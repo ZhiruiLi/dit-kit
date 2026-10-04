@@ -9,8 +9,7 @@
 //  具体工具（LUT 调色、视频裁剪）通过 argumentsBuilder 回调提供自己的 ffmpeg 参数，
 //  所以新增一个工具不需要动这个文件。
 //
-//  移植自同名的 Objective-C 版本，行为与对外文案逐字保持一致 ——
-//  自检输出里的每一行都被测试用例断言着，改词就等于改契约。
+//  自检输出里的每一行都被测试用例断言着，改文案就等于改契约。
 //
 
 import Foundation
@@ -364,8 +363,8 @@ final class DITEngine {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             if line.isEmpty { continue }
             if line.hasPrefix("out_time_us=") {
-                // 用 NSString 的 doubleValue 而不是 Double(_:)：前者按前缀解析，
-                // 与 Objective-C 版完全一致，遇到非数字尾巴也不会判成 nil
+                // 用 NSString 的 doubleValue 而不是 Double(_:)：它按前缀解析，
+                // 遇到非数字尾巴也返回 0，不会判成 nil
                 let us = (String(line.dropFirst(12)) as NSString).doubleValue
                 box.sawProgressLine = true
                 applyTime(us / 1e6, box: box)

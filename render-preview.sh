@@ -63,7 +63,7 @@ render() { # render <名称> <外观> <页号> <drop> [额外环境...]
     shift 4
     # 每次渲染前先清空偏好，保证截图内容可复现
     defaults delete local.tools.ditkit >/dev/null 2>&1 || true
-    # 取帧缩略图缓存在 $TMPDIR，跨次残留会让截图带上上一轮的画面，先清掉
+    # 先清掉 $TMPDIR 里的取帧缩略图：它跨次残留，会让截图带上上一次的画面
     rm -f "${TMPDIR:-/tmp}"/ditkit-thumb-*.png
     env -i PATH="$PATH" HOME="$HOME" \
         DITKIT_APPEARANCE="$ap" \

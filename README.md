@@ -46,15 +46,13 @@ swiftc -swift-version 5 -O -whole-module-optimization \
 
 因为用的是通配符收集源文件，**加一个新工具页不用改构建脚本**。
 
-**为什么锁在 `-swift-version 5`？** Swift 6 的严格并发检查会要求把整套 `Process` + `DispatchQueue` + 回调改写成 `async/await`，并给跨线程共享的状态标 `Sendable` —— 那是另一场重构（重做并发模型），和「用什么语言写」是两件事，真要做得单独开一版。现在这套代码在 Swift 5 语言模式下编得干净（零错误零警告）。
+**为什么锁在 `-swift-version 5`？** 这套代码的并发模型是 `Process` + `DispatchQueue` + 回调。Swift 6 的严格并发检查会要求把它们改写成 `async/await` 并给跨线程共享的状态标 `Sendable` —— 那是在换并发模型，不是换写法，真要做得单独开一版。当前在 Swift 5 语言模式下编得干净（零错误零警告）。
 
 想支持比 15 更老的系统，给 `swiftc` 显式指定目标即可（已实测能编过，产物 `minos` 为 `12.0`）：
 
 ```
 swiftc -swift-version 5 -O -target "$(uname -m)-apple-macos12.0" ...
 ```
-
-分层与语言无关：`DITEngine` 不认任何具体工具、工具页之间只通过 `DITToolPage` 协议耦合。这套分层当初就是按「将来换实现可以逐层替换」设计的，这次从 Objective-C 换成 Swift 正好把这条路走了一遍 —— `Engine` → 共享 UI → 两个页面 → 入口，每换一层跑一次套件；结果是 68 条用例全绿，自检诊断输出与旧版**逐字节相同**（10 组场景交叉比对，含列表增删、列宽拖动、LUT 后缀校验）。
 
 ---
 

@@ -14,20 +14,20 @@ var gSelfTest = false
 
 // MARK: - 环境变量小工具
 
-/// 读环境变量里的整数；语义对齐 C 的 atoi
+/// 读环境变量里的整数；解析前缀数字，非法值当 0
 private func DITEnvInt(_ name: String, _ fallback: Int) -> Int {
     guard let s = ProcessInfo.processInfo.environment[name] else { return fallback }
     return (s as NSString).integerValue
 }
 
-/// 读环境变量里的浮点数；语义对齐 C 的 atof
+/// 读环境变量里的浮点数；解析前缀数字，非法值当 0
 private func DITEnvDouble(_ name: String, _ fallback: Double) -> Double {
     guard let s = ProcessInfo.processInfo.environment[name] else { return fallback }
     return (s as NSString).doubleValue
 }
 
-/// 模拟 C 的 `%-Ns`：按 UTF-8 字节数左对齐补空格。
-/// 用字节而不是字符，是因为诊断行里混着中文页名，C 的 `%s` 也是按字节算的。
+/// 按 UTF-8 字节数左对齐补空格到 n 字节。
+/// 用字节而不是字符：诊断行里混着中文页名，按字节算才能让各列对齐。
 private func DITPad(_ s: String, _ n: Int) -> String {
     let b = s.utf8.count
     return b >= n ? s : s + String(repeating: " ", count: n - b)
@@ -178,7 +178,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         var shotPath = ""
         if let shot = env["DITKIT_SHOT"] { shotPath = shot }
 
-        // DITKIT_EXIT_WHEN_IDLE：不再死等固定秒数，而是轮询到当前页处理完就收尾退出。
+        // DITKIT_EXIT_WHEN_IDLE：轮询到当前页处理完就收尾退出，不死等固定秒数。
         // 测试套件用这个，避免「sleep 28 秒但实际 9 秒就跑完」这种既慢又不稳的写法。
         if env["DITKIT_EXIT_WHEN_IDLE"] != nil {
             let limit = DITEnvDouble("DITKIT_TIMEOUT", 60.0)
@@ -304,7 +304,7 @@ final class AppController: NSObject, NSApplicationDelegate {
               + "  子视图 \(pageView.subviews.count) 个")
 
         // 按 y 升序（翻转坐标系里就是从上到下）。Swift 的 sorted 不保证稳定，
-        // 所以把原始次序当作并列时的次级键，免得同 y 的控件顺序和以前不一样。
+        // 所以把原始次序当作并列时的次级键，让同 y 的控件顺序始终可预期。
         let sorted = pageView.subviews.enumerated()
             .sorted { a, b in
                 let ya = a.element.frame.origin.y, yb = b.element.frame.origin.y
@@ -376,7 +376,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                           defer: false)
         window.title = "DITKit"
         window.minSize = NSSize(width: 700, height: 760)
-        // 窗口底色由窗口负责（内容视图不再自己画背景，见 DITUI.swift 的说明）
+        // 窗口底色由窗口负责（内容视图不自己画背景，见 DITUI.swift 的说明）
         window.backgroundColor = NSColor.windowBackgroundColor
         window.center()
 
