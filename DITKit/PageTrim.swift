@@ -475,13 +475,26 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
             return
         }
         let s = range.start, e = range.end
+        let src = DITEngine.timeStringFromSeconds(srcDuration)
+
+        // 起点就已经在源之外：这段落不到任何画面上，长度也就无从谈起
+        guard let actual = effectiveRange(start: s, end: e) else {
+            lenLabel.stringValue = "片段长度 无内容"
+            lenLabel.toolTip = "起点超出源时长 \(src)"
+            lenLabel.textColor = NSColor.systemRed
+            rangeHint.stringValue = "起点超出源时长 \(src)，这段落在源之外，成品不会有画面；时间可以写 90 / 1m30s"
+            rangeHint.textColor = NSColor.systemOrange
+            return
+        }
+
         lenLabel.textColor = NSColor.secondaryLabelColor
-        lenLabel.stringValue = "片段长度 \(DITEngine.timeStringFromSeconds(e - s))"
+        // 长度算的是成品真正会有的长度：终点被截断时，按输入框里那个值算出来的长度
+        // 只是个请求值，照着显示会让人以为成品有那么长
+        lenLabel.stringValue = "片段长度 \(DITEngine.timeStringFromSeconds(actual.end - actual.start))"
 
         // 「超出源时长」这句放不进长度标签 —— 那一排只给它一百多点宽，右边还杵着
         // 「用完整时长」按钮。所以警告挂在下面整行宽的提示上，并用橙色以示显眼。
-        if srcDuration > 0 && e > srcDuration + 0.05 {
-            let src = DITEngine.timeStringFromSeconds(srcDuration)
+        if actual.end < e - 0.0005 {
             lenLabel.toolTip = "终点超出源时长 \(src)，实际会截断到结尾"
             rangeHint.stringValue = "终点超出源时长 \(src)，成品会截断到结尾；时间可以写 90 / 1m30s"
             rangeHint.textColor = NSColor.systemOrange
@@ -503,15 +516,41 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
             return
         }
         guard let range = currentRange(quiet: true) else { return }
-        let s = range.start, e = range.end
+        let actual = effectiveRange(start: range.start, end: range.end)
 
         // 抽帧偏右一点点，避免正好落在黑帧/转场帧上
         thumbToken += 1
-        extractFrame(at: s + 0.04, slot: 0, token: thumbToken)
-        extractFrame(at: max(s + 0.04, e - 0.04), slot: 1, token: thumbToken)
+        let token = thumbToken
+        if let actual {
+            extractFrame(at: actual.start + 0.04, slot: 0, token: token)
+            extractFrame(at: max(actual.start + 0.04, actual.end - 0.04), slot: 1, token: token)
+        } else {
+            // 整段都在源之外，没有画面可抽
+            startThumb.image = nil
+            endThumb.image = nil
+        }
 
-        startThumbLabel.stringValue = "起点 \(DITEngine.timeStringFromSeconds(s))"
-        endThumbLabel.stringValue = "终点 \(DITEngine.timeStringFromSeconds(e))"
+        // 标签跟着成品实际落到的位置走。照抄输入框里的值会出现「终点 00:00:20.000」
+        // 配一个空框、而旁边提示又说「成品会截断到结尾」这种互相打架的三方说法。
+        if let actual {
+            startThumbLabel.stringValue = "起点 \(DITEngine.timeStringFromSeconds(actual.start))"
+            let mark = actual.end < range.end - 0.0005 ? "（源结尾）" : ""
+            endThumbLabel.stringValue = "终点 \(DITEngine.timeStringFromSeconds(actual.end))\(mark)"
+        } else {
+            startThumbLabel.stringValue = "起点 \(DITEngine.timeStringFromSeconds(range.start))（源之外）"
+            endThumbLabel.stringValue = "终点 \(DITEngine.timeStringFromSeconds(range.end))（源之外）"
+        }
+    }
+
+    /// 成品实际会落到的范围：与源内容取交集。
+    ///
+    /// 终点超出源时长时 ffmpeg 会自然截断到结尾，所以实际终点就是源时长；
+    /// 起点就已经在源之外时根本没有内容可截，返回 nil。
+    /// 源时长还没探到时不做任何收缩 —— 宁可照抄填的值，也不猜。
+    private func effectiveRange(start: Double, end: Double) -> (start: Double, end: Double)? {
+        guard srcDuration > 0 else { return (start, end) }
+        if start >= srcDuration { return nil }
+        return (start, min(end, srcDuration))
     }
 
     private func extractFrame(at t: Double, slot: Int, token: Int) {
@@ -738,8 +777,14 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
             DITTrimArguments(job, spec)
         }
 
-        // 进度要按「片段长度」算，而不是源文件总时长
-        engine.expectedDuration = { _ in spec.duration }
+        // 进度分母是片段长度，不是源文件总时长。终点超出某个文件的时长时，那个文件
+        // 实际只会截到结尾 —— 分母要是照抄请求长度，进度条走到一半就直接跳完成。
+        // 所以现探一次源时长：每个文件一趟 ffprobe，代价远小于把进度算错。
+        engine.expectedDuration = { job in
+            let d = DITEngine.probeDuration(job.inputPath)
+            guard d > 0, spec.endSec > d else { return spec.duration }
+            return max(0.0, d - spec.startSec)
+        }
 
         engine.onJobUpdate = { [weak self] job in self?.jobUpdated(job) }
         engine.onFinished = { [weak self] in self?.allFinished() }
@@ -999,7 +1044,19 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
             jobs.append(j)
         }
 
-        print("范围  : \(DITEngine.timeStringFromSeconds(spec.startSec)) → \(DITEngine.timeStringFromSeconds(spec.endSec))（\(DITEngine.timeStringFromSeconds(spec.duration))）")
+        // 摘要里的范围按「成品实际会落到的位置」打印。照抄填的终点，用户会以为成品
+        // 真有那么长 —— 而超出第一个文件长度的部分会被 ffmpeg 截掉。
+        // 连起点都在源之外时没有可截的位置，保持原样打印，由提示行说明不会有画面。
+        let firstDur = DITEngine.probeDuration(files[0])
+        let startBeyond = firstDur > 0 && spec.startSec >= firstDur
+        let endBeyond = firstDur > 0 && spec.endSec > firstDur
+        let shownEnd = (endBeyond && !startBeyond) ? firstDur : spec.endSec
+        print("范围  : \(DITEngine.timeStringFromSeconds(spec.startSec)) → \(DITEngine.timeStringFromSeconds(shownEnd))（\(DITEngine.timeStringFromSeconds(shownEnd - spec.startSec))）")
+        if startBeyond {
+            print("提示  : 第一个文件只有 \(DITEngine.timeStringFromSeconds(firstDur))，起点超出其长度，这个文件不会有画面")
+        } else if endBeyond {
+            print("提示  : 第一个文件只有 \(DITEngine.timeStringFromSeconds(firstDur))，终点超出其长度，上面按截断后的实际范围显示")
+        }
         print("方式  : \(spec.fastCopy ? "快速（流复制）" : "精确（重编码）")")
         print("文件数: \(jobs.count)   并发: \(o.maxConcurrent)")
         print("")
@@ -1007,7 +1064,7 @@ final class PageTrim: NSObject, DITToolPage, NSTextFieldDelegate {
         let engine = DITEngine(jobs: jobs, output: o) { job, _ in
             DITTrimArguments(job, spec)
         }
-        engine.expectedDuration = { _ in spec.duration }
+        engine.expectedDuration = { _ in spec.duration }   // 命令行不显示进度，用不上这个
 
         var failed = 0
         var finished = 0

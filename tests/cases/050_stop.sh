@@ -131,20 +131,24 @@ c_lut_full_run() {
     note "状态行: $status"
 }
 
-# 提示：停止时被杀掉的任务会在磁盘留下一个「可播放的残片」
-# （ffmpeg 收到 SIGTERM 会优雅收尾、把容器写完）。
-# 这里只把它报出来，不做好坏判断 —— 处理方式还没定。
-c_stop_partial_note() {
-    local d n
+# 停止时被杀掉的任务会在磁盘留下半个文件。ffmpeg 收到 SIGTERM 会把容器写完，
+# 所以它其实还能播（实测：源 20 秒，残片 7.4 秒、2.1MB，ffprobe 读得出来），
+# 顶着 .mp4 放在那里就会被当成成品，还会让下一次同名重跑被判成「已存在」。
+# 所以扩展名必须换成 .partial。
+c_stop_leaves_partial_only() {
+    local d names n bad
     d="$WORK/stop/lut/out"
     [ -d "$d" ] || skip "上一轮停止用例没跑，跳过"
-    n=$(ls "$d" 2>/dev/null | wc -l | tr -d ' ')
+    names=$(ls "$d" 2>/dev/null || true)
+    n=$(printf '%s\n' "$names" | grep -c . || true)
     expect_le "$n" 1 "停止后产物数量"
-    note "停止时产物目录里有 $n 个文件（被杀任务留下的残片是完整可播放的，见 README 已知限制）"
+    bad=$(printf '%s\n' "$names" | grep -v '\.partial$' | grep . || true)
+    expect_eq "" "$bad" "残留文件必须都叫 .partial"
+    note "停止后产物目录：$(printf '%s' "$names" | tr '\n' ' ')"
 }
 
 reg \
     "LUT 页停止后排队的任务被正确记账"        c_lut_stop_drains_queue \
     "裁剪页停止后排队的任务被正确记账"        c_trim_stop_drains_queue \
     "不停止时全部跑完"                        c_lut_full_run \
-    "停止后至多留下 1 个产物"                 c_stop_partial_note
+    "停止后留下的残片一律叫 .partial"          c_stop_leaves_partial_only

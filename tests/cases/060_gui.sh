@@ -165,6 +165,39 @@ c_trim_page_has_content() {
     expect_eq "content" "$(image_band "$png" 260 700)" "裁剪页主体区间应当有内容"
 }
 
+# 终点超出源时长时，这一页要按「成品实际会落到的位置」显示，不能照抄输入框里的值。
+#
+# 照抄会出现三方打架：终点格按超出的时刻抽帧（源 10 秒却去抽第 20 秒，实测 ffmpeg
+# 退出 0 但不产出文件）→ 留一个空框，而标签写着 00:00:20.000，旁边提示又说「成品会
+# 截断到结尾」。所以缩略图与标签都跟着截断后的位置走。
+# 起止都落在源之外时更没有画面可抽，长度要写「无内容」—— 按输入框算会得到负数。
+c_trim_page_shows_actual_range() {
+    gui_available || skip "当前会话没有图形界面"
+    local dir log
+    dir=$(gui_dir)
+
+    # ruler_a.mp4 是 10 秒：请求 2→20，成品实际是 2→10，长度 8 秒
+    defaults_reset
+    log=$(gui_run 60 "$dir/trim-clamp.log" \
+        DITKIT_APPEARANCE=dark DITKIT_PAGE=1 \
+        DITKIT_DROP="$FIX/ruler_a.mp4" \
+        DITKIT_TRIM_START=00:00:02 DITKIT_TRIM_END=00:00:20)
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" '"片段长度 00:00:08.000"' "片段长度要按截断后的实际长度"
+    expect_contains "$log" '"终点 00:00:10.000（源结尾）"' "终点标签要标出被截断"
+    expect_contains "$log" '"起点 00:00:02.000"' "起点标签"
+
+    # 请求 30→40：整段在源之外，没有任何画面
+    defaults_reset
+    log=$(gui_run 60 "$dir/trim-outside.log" \
+        DITKIT_APPEARANCE=dark DITKIT_PAGE=1 \
+        DITKIT_DROP="$FIX/ruler_a.mp4" \
+        DITKIT_TRIM_START=00:00:30 DITKIT_TRIM_END=00:00:40)
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" '"片段长度 无内容"' "整段在源之外时不要算长度"
+    expect_contains "$log" '"起点 00:00:30.000（源之外）"' "起点标签要标出源之外"
+}
+
 # 音频页：渲染有内容、列表同样是拖入区、源信息会报出音频流概况。
 # 两个素材都复制成短名字并放进同一个目录 —— 源信息取列表里第一个文件，
 # 而诊断行会把标签截到 26 个字符，用长文件名就把「音频概况」整段截掉了。
@@ -526,6 +559,7 @@ reg \
     "顶栏（标题与页切换器）真的画出来了" c_top_bar_has_content \
     "页面主体真的画出来了"              c_page_body_has_content \
     "裁剪页也画得有内容"                c_trim_page_has_content \
+    "裁剪页按成品实际范围显示"           c_trim_page_shows_actual_range \
     "音频页也画得有内容且列表可用"       c_audio_page_works \
     "遮罩页也画得有内容，合成静帧出图"    c_mask_page_works \
     "遮罩页给预览和列表各留出空间"        c_mask_page_layout_reserves_room \

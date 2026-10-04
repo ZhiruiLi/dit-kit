@@ -58,6 +58,25 @@ c_no_media_found() {
         "$BIN" --cli --lut "$FIX/identity.cube" --out "$d" -- "$d/notes.txt"
 }
 
+# 摘要里的范围按「成品实际会落到的位置」打印：ruler_a.mp4 是 10 秒，终点填 20 秒会被
+# 截到 10 秒。照抄填的值，用户会以为成品真有 18 秒。
+c_trim_summary_clamped() {
+    local d out
+    d=$(fresh_dir cli-trim-clamp)
+    out=$(run "$BIN" --cli --trim --start 2 --end 20 --fast --out "$d" -- "$FIX/ruler_a.mp4")
+    expect_contains "$out" "00:00:02.000 → 00:00:10.000（00:00:08.000）" "范围按截断后打印"
+    expect_contains "$out" "终点超出其长度" "说明为什么不是 18 秒"
+}
+
+# 连起点都在源之外时没有可截的位置：范围保持原样，改由提示行说明这个文件不会有画面
+c_trim_summary_outside_source() {
+    local d out
+    d=$(fresh_dir cli-trim-outside)
+    out=$(run "$BIN" --cli --trim --start 30 --end 40 --fast --out "$d" -- "$FIX/ruler_a.mp4")
+    expect_contains "$out" "00:00:30.000 → 00:00:40.000（00:00:10.000）" "范围保持原样"
+    expect_contains "$out" "起点超出其长度" "说明不会有画面"
+}
+
 reg \
     "help 列出两种模式且退出码 0"        c_help_exit0 \
     "--cli 不带模式退出 2"               c_no_mode \
@@ -68,4 +87,6 @@ reg \
     "终点不大于起点退出 2"               c_trim_reversed_range \
     "没有输入文件退出 2"                 c_trim_no_input \
     "未知参数退出 2"                     c_unknown_flag \
-    "输入里没有视频时退出 2 并提示"      c_no_media_found
+    "输入里没有视频时退出 2 并提示"      c_no_media_found \
+    "摘要按截断后的实际范围打印"         c_trim_summary_clamped \
+    "整段在源之外时摘要保持原样并提示"    c_trim_summary_outside_source

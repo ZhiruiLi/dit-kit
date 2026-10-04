@@ -11,6 +11,9 @@
 //
 //  另外这里也放着与具体工具无关的 ffprobe 探测（时长 / 画面尺寸 / 音视频流概况）。
 //
+//  没跑完的任务（被停止、或 ffmpeg 报错退出）留下的产物一律改名成 `.partial`，
+//  所以带视频扩展名的文件一定是成品。
+//
 //  自检输出里的每一行都被测试用例断言着，改文案就等于改契约。
 //
 
@@ -96,6 +99,9 @@ private final class DITTaskBox {
     let outPipe = Pipe()
     let errPipe = Pipe()
     var errBuf = ""
+    /// 这条任务开始跑的时刻（ffmpeg 一启动就会建好输出文件，用它区分
+    /// 「本次写出来的半成品」与「启动前就摆在那里的别人的成品」）
+    let startedAt = Date()
     /// ffmpeg 报告的源时长
     var durationSec: Double = 0
     /// 工具声明的预期输出时长
@@ -444,8 +450,47 @@ final class DITEngine {
             job.statusText = "失败 (ffmpeg 退出码 \(status))"
             job.errorText = DITEngine.tail(of: box.errBuf, lines: 12)
         }
+
+        // 没跑完的任务会在输出目录留下半个文件。ffmpeg 收到 SIGTERM 会把容器写完，
+        // 所以它其实还能播 —— 顶着 .mp4 放在那里就会被当成成品。
+        if job.state != .done {
+            demoteToPartial(job, startedAt: box.startedAt)
+        }
+
         notify(job)
         pump()
+    }
+
+    /// 把没跑完的产物改名成 `.partial`。
+    ///
+    /// 扩展名不是视频格式，一眼就能看出它不是成品；顺带把同名的成品位置空出来，
+    /// 下次同一批再跑时不会被「已存在」判掉。上一次留下的同名残片没有保留价值，直接覆盖。
+    private func demoteToPartial(_ job: DITJob, startedAt: Date) {
+        guard let out = job.outputPath, !out.isEmpty else { return }
+        guard DITEngine.isWrittenByThisRun(out, since: startedAt) else { return }
+
+        let fm = FileManager.default
+        let dir = (out as NSString).deletingLastPathComponent
+        let base = ((out as NSString).lastPathComponent as NSString).deletingPathExtension
+        let partial = (dir as NSString).appendingPathComponent(base + ".partial")
+        do {
+            if fm.fileExists(atPath: partial) { try fm.removeItem(atPath: partial) }
+            try fm.moveItem(atPath: out, toPath: partial)
+        } catch {
+            job.errorText = "没能把没跑完的产物改名成 .partial：\(error.localizedDescription)"
+        }
+    }
+
+    /// 输出文件是不是本次运行写出来的。
+    ///
+    /// 判断依据是修改时间：ffmpeg 打开输出文件就会建好它，所以「文件存在 + 刚被写过」
+    /// 说明这是我们写了一半的产物。反过来，文件比本次启动还旧，说明 ffmpeg 根本没碰过
+    /// 输出（输入探测阶段就报错、或 `-n` 撞上已有文件），那是摆在原处的成品，不能动。
+    /// 容 1 秒误差：有的文件系统时间戳精度只到秒。
+    static func isWrittenByThisRun(_ path: String, since: Date) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let mtime = attrs[.modificationDate] as? Date else { return false }
+        return mtime >= since.addingTimeInterval(-1.0)
     }
 }
 
