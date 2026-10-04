@@ -61,11 +61,16 @@ void DITPlaceSection(NSTextField *_Nullable label, CGFloat *y, CGFloat x, CGFloa
 @property (nonatomic, copy, nullable) void (^onClear)(void);
 @property (nonatomic, copy, nullable) void (^onReveal)(void);
 
+/// 状态行当前文字（自检断言用）
+@property (nonatomic, readonly, copy) NSString *statusText;
+
 - (void)addToView:(NSView *)superview;
 - (void)setStartTitle:(NSString *)title;
 - (void)setStatus:(NSString *)status;
 - (void)setProgress:(double)progress;
 - (void)setRunning:(BOOL)running canStart:(BOOL)canStart;
+/// 单独控制「停止」键。停止过程中把它置灰，避免重复点击
+- (void)setStopEnabled:(BOOL)enabled;
 
 /// 从容器底部向上排放，返回表格区可用的底部边界
 - (CGFloat)layoutFromBottom:(CGFloat)bottom x:(CGFloat)x width:(CGFloat)w;
@@ -88,6 +93,10 @@ void DITPlaceSection(NSTextField *_Nullable label, CGFloat *y, CGFloat x, CGFloa
 - (void)addInputPaths:(NSArray<NSString *> *)paths;
 /// 直接开始处理（等价于点「开始」按钮；自检、将来的「拖入即跑」都用它）
 - (void)beginRun;
+/// 直接停止（等价于点「停止」按钮；主要给自检用）
+- (void)beginStop;
+/// 状态行当前文字（自检断言用）
+- (NSString *)statusLine;
 @end
 
 NS_ASSUME_NONNULL_END

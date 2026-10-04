@@ -1,6 +1,7 @@
 //  Engine.m —— DITKit 通用转换引擎的实现
 
 #import "Engine.h"
+#import <signal.h>   // kill / SIGKILL：停止流程的信号升级兜底
 
 #pragma mark - 任务
 
@@ -250,9 +251,43 @@
 - (void)cancel {
     if (!_running) return;
     _cancelled = YES;
-    for (DITTaskBox *box in [_active copy]) {
-        [box.task terminate];
+
+    // 1) 正在跑的：发 SIGTERM（ffmpeg 实测 0.25s 内就退出）
+    NSArray<DITTaskBox *> *active = [_active copy];
+    for (DITTaskBox *box in active) {
+        if (box.task.isRunning) [box.task terminate];
     }
+
+    // 2) 还在排队的：直接判为已取消并把队列清空。
+    //    这一步不能省 —— pump 的调度循环带 `!_cancelled` 守卫，
+    //    而收尾条件是 `_active.count == 0 && _queue.count == 0`。
+    //    只打标记不清队列的话，队列永远不会被消费，收尾条件永不成立，
+    //    onFinished 不触发，界面就永久停在「正在停止…」。
+    if (_queue.count) {
+        for (DITJob *job in _queue) {
+            job.state = DITJobStateCancelled;
+            job.statusText = @"已取消";
+            [self notify:job];
+        }
+        [_queue removeAllObjects];
+    }
+
+    // 3) 兜底：SIGTERM 之后若还有任务赖着不走，1.5 秒后升级成 SIGKILL。
+    //    硬编（Videotoolbox）偶尔会卡在驱动里不响应信号，没有这层「停止」会假死。
+    if (active.count) {
+        __weak DITEngine *ws = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            DITEngine *ss = ws;
+            if (!ss) return;
+            for (DITTaskBox *box in [ss->_active copy]) {
+                if (box.task.isRunning) kill(box.task.processIdentifier, SIGKILL);
+            }
+        });
+    }
+
+    // 4) 此刻若已无活跃任务，pump 会立刻收尾；否则等最后一个终止回调再收尾
+    [self pump];
 }
 
 #pragma mark 调度
@@ -264,18 +299,25 @@
 - (void)pump {
     NSInteger maxC = MAX(1, _output.maxConcurrent);
 
-    while (!_cancelled && _active.count < (NSUInteger)maxC && _queue.count > 0) {
-        DITJob *job = _queue.firstObject;
-        [_queue removeObjectAtIndex:0];
-
-        if (_cancelled) {
+    if (_cancelled) {
+        // 双保险：正常路径下 cancel 已经清空队列，这里再兜一次，
+        // 保证「取消后队列必为空」这个不变量在任何调用路径下都成立。
+        while (_queue.count > 0) {
+            DITJob *job = _queue.firstObject;
+            [_queue removeObjectAtIndex:0];
             job.state = DITJobStateCancelled;
             job.statusText = @"已取消";
-            continue;
+            [self notify:job];
         }
-        [self launchJob:job];
+    } else {
+        while (_active.count < (NSUInteger)maxC && _queue.count > 0) {
+            DITJob *job = _queue.firstObject;
+            [_queue removeObjectAtIndex:0];
+            [self launchJob:job];
+        }
     }
 
+    // 收尾条件：既没有在跑的，也没有排队的
     if (_active.count == 0 && _queue.count == 0) {
         if (_running) {
             _running = NO;

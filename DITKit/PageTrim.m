@@ -81,6 +81,7 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     NSString *_srcPath;          // 第一个源文件（媒体信息与缩略图取样）
     double _srcDuration;
     NSString *_lastOutputDir;
+    BOOL _stopping;              // 已点击停止、等引擎收尾；期间不让进度行覆盖提示
     NSInteger _thumbToken;       // 防止旧抽帧结果覆盖新画面
     NSInteger _concurrency;      // 并发数（沿用偏好里的设定）
     NSInteger _conflictIndex;    // 命名冲突策略
@@ -556,6 +557,14 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     [self startTrim];
 }
 
+- (void)beginStop {
+    [self stopTrim];
+}
+
+- (NSString *)statusLine {
+    return _actionBar.statusText;
+}
+
 - (void)addPaths:(NSArray<NSString *> *)paths {
     if (_engine.isRunning) { NSBeep(); return; }
     DITOutputOptions *o = [self buildOptions];
@@ -729,8 +738,12 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
 }
 
 - (void)stopTrim {
-    [_engine cancel];
+    if (_stopping) return;              // 重复点击幂等
+    if (!_engine.isRunning) return;
+    _stopping = YES;
     [_actionBar setStatus:@"正在停止…"];
+    [_actionBar setStopEnabled:NO];     // 已经在停了，别让用户反复点
+    [_engine cancel];
 }
 
 - (void)jobUpdated:(DITJob *)job {
@@ -748,41 +761,54 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
         return;
     }
     double sum = 0;
-    NSInteger done = 0, failed = 0, skipped = 0;
+    NSInteger done = 0, failed = 0, skipped = 0, cancelled = 0;
     DITJob *active = nil;
     for (DITJob *j in jobs) {
         sum += j.progress;
         if (j.state == DITJobStateDone) done++;
         else if (j.state == DITJobStateFailed) failed++;
         else if (j.state == DITJobStateSkipped) skipped++;
+        else if (j.state == DITJobStateCancelled) cancelled++;
         else if (j.state == DITJobStateRunning) active = j;
     }
     [_actionBar setProgress:sum / (double)jobs.count];
+
+    // 停止过程中只刷新进度条，别用进度行盖掉「正在停止…」
+    if (_stopping) return;
 
     NSMutableString *s = [NSMutableString string];
     [s appendFormat:@"%ld / %ld 完成", (long)done, (long)jobs.count];
     if (failed) [s appendFormat:@"　·　%ld 失败", (long)failed];
     if (skipped) [s appendFormat:@"　·　%ld 跳过", (long)skipped];
+    if (cancelled) [s appendFormat:@"　·　%ld 已取消", (long)cancelled];
     if (active) [s appendFormat:@"　·　正在处理 %@", active.displayName];
     [_actionBar setStatus:s];
 }
 
 - (void)allFinished {
+    _stopping = NO;
     [self updateProgress];
-    NSInteger done = 0, failed = 0, skipped = 0;
+
+    NSInteger done = 0, failed = 0, skipped = 0, cancelled = 0, pending = 0;
     for (DITJob *j in _jobTable.jobs) {
         if (j.state == DITJobStateDone) done++;
         else if (j.state == DITJobStateFailed) failed++;
         else if (j.state == DITJobStateSkipped) skipped++;
+        else if (j.state == DITJobStateCancelled) cancelled++;
+        else pending++;   // 正常路径下应为 0；非 0 说明收尾漏了任务，直接暴露出来
     }
-    if (failed == 0) {
-        [_actionBar setStatus:[NSString stringWithFormat:@"全部结束：成功 %ld　跳过 %ld",
-                                                         (long)done, (long)skipped]];
-    } else {
-        [_actionBar setStatus:[NSString stringWithFormat:@"结束：成功 %ld　失败 %ld　跳过 %ld"
-                                                      @"（鼠标悬停失败行可看原因）",
-                                                      (long)done, (long)failed, (long)skipped]];
-    }
+
+    // 被停止过就换成「已停止」的说法，别把取消掉的任务伪装成成功/跳过
+    NSMutableString *s = [NSMutableString string];
+    BOOL stopped = (cancelled + pending) > 0;
+    [s appendFormat:@"%@：成功 %ld", stopped ? @"已停止" : @"全部结束", (long)done];
+    if (failed) [s appendFormat:@"　失败 %ld", (long)failed];
+    if (skipped) [s appendFormat:@"　跳过 %ld", (long)skipped];
+    if (cancelled) [s appendFormat:@"　已取消 %ld", (long)cancelled];
+    if (pending) [s appendFormat:@"　未处理 %ld", (long)pending];
+    if (failed) [s appendString:@"（鼠标悬停失败行可看原因）"];
+    [_actionBar setStatus:s];
+
     _engine = nil;
     [self refreshAll];
 }
@@ -790,6 +816,7 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
 - (void)refreshAll {
     BOOL running = _engine.isRunning;
     [_actionBar setRunning:running canStart:(_jobTable.jobs.count > 0)];
+    [_actionBar setStopEnabled:running && !_stopping];
     _srcWell.enabled = !running;
     _outField.enabled = !running;
     _outModeSeg.enabled = !running;

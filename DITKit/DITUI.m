@@ -353,6 +353,10 @@ void DITPlaceSection(NSTextField *label, CGFloat *y, CGFloat x, CGFloat w) {
     _statusLabel.stringValue = status;
 }
 
+- (NSString *)statusText {
+    return _statusLabel.stringValue ?: @"";
+}
+
 - (void)setProgress:(double)progress {
     [_progress setDoubleValue:progress];
 }
@@ -363,6 +367,10 @@ void DITPlaceSection(NSTextField *label, CGFloat *y, CGFloat x, CGFloat w) {
     [_startBtn setEnabled:(!running && canStart)];
     [_stopBtn setEnabled:running];
     [_clearBtn setEnabled:!running];
+}
+
+- (void)setStopEnabled:(BOOL)enabled {
+    [_stopBtn setEnabled:enabled];
 }
 
 - (CGFloat)layoutFromBottom:(CGFloat)bottom x:(CGFloat)x width:(CGFloat)w {

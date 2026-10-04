@@ -123,6 +123,15 @@ static NSBitmapImageRep *DITCaptureWindow(NSWindow *win) {
         if ([page respondsToSelector:@selector(beginRun)]) [page beginRun];
     }
 
+    // DITKIT_STOP_AFTER 秒后自动点一次「停止」，用于复现/回归停止路径
+    const char *stopAfter = getenv("DITKIT_STOP_AFTER");
+    if (stopAfter) {
+        [NSTimer scheduledTimerWithTimeInterval:atof(stopAfter) repeats:NO block:^(NSTimer *tm) {
+            id<DITToolPage> page = self->_pages[(NSUInteger)self->_currentPage];
+            if ([page respondsToSelector:@selector(beginStop)]) [page beginStop];
+        }];
+    }
+
     NSString *shotPath = nil;
     const char *shot = getenv("DITKIT_SHOT");
     if (shot) shotPath = [NSString stringWithUTF8String:shot];
@@ -191,6 +200,13 @@ static NSBitmapImageRep *DITCaptureWindow(NSWindow *win) {
         id<DITToolPage> p = _pages[i];
         printf("  [%lu] %-16s %s\n", (unsigned long)i, p.pageTitle.UTF8String,
                (NSInteger)i == _currentPage ? "<- 当前" : "");
+    }
+
+    // 当前页的运行态：自检用它断言「停止后是否真的收尾了」
+    {
+        id<DITToolPage> p = _pages[(NSUInteger)_currentPage];
+        NSString *st = [p respondsToSelector:@selector(statusLine)] ? [p statusLine] : @"(未实现)";
+        printf("运行态  : busy=%d  状态行=%s\n", p.busy ? 1 : 0, st.UTF8String);
     }
 
     printf("顶层子视图:\n");
