@@ -45,6 +45,10 @@ clang -fobjc-arc -O2 -Wall -framework Cocoa -framework UniformTypeIdentifiers -o
 
 因为用的是通配符收集源文件，**加一个新工具页不用改构建脚本**。
 
+用 Objective-C 而不是 Swift，是为了让构建只依赖 Command Line Tools 里的 `clang`：没有 Xcode 工程文件、没有依赖管理、没有额外的语言工具链，clone 下来 `./build.sh` 直接出可执行文件。
+
+分层与语言无关：`DITEngine` 不认任何具体工具、工具页之间只通过 `DITToolPage` 协议耦合，所以将来若要换实现可以逐层替换（先 `Engine`，再逐个页面，最后 UI），`build.sh` 里换掉编译器即可，CLI 行为不变。
+
 ---
 
 ## 图形界面
