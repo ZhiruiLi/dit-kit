@@ -19,8 +19,8 @@ macOS 上的视频工具箱。原生 AppKit 界面 + 同一套逻辑的命令行
 
 ## 环境要求
 
-- **macOS 12 或更高**
-- **Xcode Command Line Tools**（只需要里面的 `clang`，**不需要装 Xcode**）
+- **macOS 15 或更高**（这是当前构建脚本产物的部署目标。`swiftc` 默认拿本机系统版本当部署目标，想支持更老的系统见下面「构建」一节）
+- **Xcode Command Line Tools**（只需要里面的 `swiftc`，**不需要装 Xcode**）
 - **ffmpeg**
   ```bash
   brew install ffmpeg
@@ -35,19 +35,26 @@ cd dit-kit
 ./build.sh
 ```
 
-产物是 `build/DITKit.app`（约 270 KB），**双击即可运行**。`build.sh` 会顺手做一次 ad-hoc 临时签名，避免 Gatekeeper 拦。
+产物是 `build/DITKit.app`（约 420 KB），**双击即可运行**。`build.sh` 会顺手做一次 ad-hoc 临时签名，避免 Gatekeeper 拦。
 
-源码里没有 Xcode 工程文件，`build.sh` 直接调 `clang` 把 `DITKit/*.m` 一次编完：
+源码里没有 Xcode 工程文件、没有依赖管理，`build.sh` 直接调 `swiftc` 把 `DITKit/*.swift` 一次编完：
 
 ```
-clang -fobjc-arc -O2 -Wall -framework Cocoa -framework UniformTypeIdentifiers -o ...
+swiftc -swift-version 5 -O -whole-module-optimization \
+  -framework Cocoa -framework UniformTypeIdentifiers -o ...
 ```
 
 因为用的是通配符收集源文件，**加一个新工具页不用改构建脚本**。
 
-用 Objective-C 而不是 Swift，是为了让构建只依赖 Command Line Tools 里的 `clang`：没有 Xcode 工程文件、没有依赖管理、没有额外的语言工具链，clone 下来 `./build.sh` 直接出可执行文件。
+**为什么锁在 `-swift-version 5`？** Swift 6 的严格并发检查会要求把整套 `Process` + `DispatchQueue` + 回调改写成 `async/await`，并给跨线程共享的状态标 `Sendable` —— 那是另一场重构（重做并发模型），和「用什么语言写」是两件事，真要做得单独开一版。现在这套代码在 Swift 5 语言模式下编得干净（零错误零警告）。
 
-分层与语言无关：`DITEngine` 不认任何具体工具、工具页之间只通过 `DITToolPage` 协议耦合，所以将来若要换实现可以逐层替换（先 `Engine`，再逐个页面，最后 UI），`build.sh` 里换掉编译器即可，CLI 行为不变。
+想支持比 15 更老的系统，给 `swiftc` 显式指定目标即可（已实测能编过，产物 `minos` 为 `12.0`）：
+
+```
+swiftc -swift-version 5 -O -target "$(uname -m)-apple-macos12.0" ...
+```
+
+分层与语言无关：`DITEngine` 不认任何具体工具、工具页之间只通过 `DITToolPage` 协议耦合。这套分层当初就是按「将来换实现可以逐层替换」设计的，这次从 Objective-C 换成 Swift 正好把这条路走了一遍 —— `Engine` → 共享 UI → 两个页面 → 入口，每换一层跑一次套件；结果是 68 条用例全绿，自检诊断输出与旧版**逐字节相同**（10 组场景交叉比对，含列表增删、列宽拖动、LUT 后缀校验）。
 
 ---
 
@@ -153,11 +160,11 @@ DITKit=./build/DITKit.app/Contents/MacOS/DITKit
 ```
 dit-kit/
 ├── DITKit/                 源码
-│   ├── main.m              入口：窗口骨架（标题 / ffmpeg 状态 / 工具页切换），以及 --cli 分发
-│   ├── DITUI.{h,m}         共享 UI 零件：拖放区、任务表格、操作栏、布局容器、工具页协议
-│   ├── Engine.{h,m}        与工具无关的调度引擎：并发、进度解析、冲突策略、工具查找、时间码解析
-│   ├── PageLUT.{h,m}       LUT 批量套用页（GUI + CLI）
-│   ├── PageTrim.{h,m}      视频裁剪页（GUI + CLI）
+│   ├── main.swift          入口：窗口骨架（标题 / ffmpeg 状态 / 工具页切换），以及 --cli 分发
+│   ├── DITUI.swift         共享 UI 零件：拖放区、任务表格、操作栏、布局容器、工具页协议
+│   ├── Engine.swift        与工具无关的调度引擎：并发、进度解析、冲突策略、工具查找、时间码解析
+│   ├── PageLUT.swift       LUT 批量套用页（GUI + CLI）
+│   ├── PageTrim.swift      视频裁剪页（GUI + CLI）
 │   └── Info.plist
 ├── tests/                  测试套件（见 tests/README.md）
 │   ├── run.sh              入口
@@ -174,14 +181,14 @@ dit-kit/
 ### 设计要点
 
 - **GUI 与 CLI 共用同一份 ffmpeg 参数构造代码。** 每个页面把参数生成抽成一个纯函数（`DITLUTArguments()` / `DITTrimArguments()`），GUI 和 `--cli` 都调它，所以两条路径的行为不会漂移。
-- **`main.m` 只负责窗口骨架。** 所有工具页都常驻在页容器里，切换时用 `hidden` 显隐 —— 这样切页不会丢掉各自已拖入的素材和参数。
+- **`main.swift` 只负责窗口骨架。** 所有工具页都常驻在页容器里，切换时用 `hidden` 显隐 —— 这样切页不会丢掉各自已拖入的素材和参数。
 - **`DITEngine` 不认识任何具体工具。** 它靠一个 `DITArgsBuilder` 闭包拿到 ffmpeg 参数，另外可选地提供 `preflight`（前置校验）和 `expectedDuration`（预期输出时长，用于算进度 —— 裁剪页就是靠它把进度基准从「源时长」换成「片段时长」）。
 
 ### 加一个新工具页
 
-1. 写一对 `PageXxx.h/.m`，实现 `DITToolPage` 协议，提供 `view`、`pageTitle`、`layoutInBounds:`、`busy`；
-2. 在 `main.m` 的 `_pages` 数组里挂上 `[[PageXxx alloc] init]`；
-3. 如果需要在 `--cli` 下也能用，再加一个 `+runCLI:` 和 `+cliUsage`，并在 `RunCLI()` 里分发。
+1. 写一个 `PageXxx.swift`，实现 `DITToolPage` 协议，提供 `view`、`pageTitle`、`layoutInBounds(_:)`、`busy`；
+2. 在 `main.swift` 的 `pages` 数组里挂上 `PageXxx()`；
+3. 如果需要在 `--cli` 下也能用，再加一个 `static func runCLI(_:)` 和 `static var cliUsage`，并在 `RunCLI()` 里分发。
 
 构建脚本不用动。
 

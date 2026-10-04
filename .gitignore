@@ -8,7 +8,7 @@ tests/work/
 .DS_Store
 ._*
 
-# clang / Xcode 中间文件
+# 编译器 / Xcode 中间文件
 *.o
 *.dSYM/
 DerivedData/
