@@ -118,6 +118,45 @@ static NSBitmapImageRep *DITCaptureWindow(NSWindow *win) {
         [self doLayout];
     }
 
+    // DITKIT_LUT_DROP：模拟把文件拖进 LUT 拖放区（用来验证后缀名过滤）
+    const char *lutDrop = getenv("DITKIT_LUT_DROP");
+    if (lutDrop) {
+        id<DITToolPage> page = _pages[(NSUInteger)_currentPage];
+        if ([page isKindOfClass:[PageLUT class]]) {
+            NSString *s = [NSString stringWithUTF8String:lutDrop];
+            [(PageLUT *)page simulateLUTDrop:[s componentsSeparatedByString:@"|"]];
+        }
+    }
+
+    // DITKIT_COLUMN_DRAG=<列号>:<加宽量>：模拟拖一次列分隔条，随后再走一遍布局 ——
+    // 用户调过的列宽不该被「按容器宽度自动分配」抹掉
+    const char *colDrag = getenv("DITKIT_COLUMN_DRAG");
+    if (colDrag) {
+        NSString *s = [NSString stringWithUTF8String:colDrag];
+        NSArray<NSString *> *parts = [s componentsSeparatedByString:@":"];
+        id<DITToolPage> page = _pages[(NSUInteger)_currentPage];
+        if (parts.count == 2 && [page respondsToSelector:@selector(simulateColumnResize:delta:)]) {
+            [page simulateColumnResize:[parts[0] integerValue] delta:[parts[1] doubleValue]];
+            [self doLayout];
+        }
+    }
+
+    // DITKIT_LIST_ACTION=select-all|delete|delete-all：驱动列表的选中与删除
+    const char *listAction = getenv("DITKIT_LIST_ACTION");
+    if (listAction) {
+        NSString *act = [NSString stringWithUTF8String:listAction];
+        id<DITToolPage> page = _pages[(NSUInteger)_currentPage];
+        if (([act isEqualToString:@"select-all"] || [act isEqualToString:@"delete-all"]) &&
+            [page respondsToSelector:@selector(selectAllJobs)]) {
+            [page selectAllJobs];
+        }
+        if ([act hasPrefix:@"delete"] &&
+            [page respondsToSelector:@selector(deleteSelectedJobs)]) {
+            [page deleteSelectedJobs];
+        }
+        [self doLayout];
+    }
+
     BOOL autostart = getenv("DITKIT_AUTOSTART") != NULL;
     if (autostart) {
         id<DITToolPage> page = _pages[(NSUInteger)_currentPage];
@@ -277,14 +316,32 @@ static NSBitmapImageRep *DITCaptureWindow(NSWindow *win) {
             extra = [NSString stringWithFormat:@"  \"%@\"", s];
         } else if ([v isKindOfClass:[DropWellView class]]) {
             extra = [NSString stringWithFormat:@"  [%@]", [(DropWellView *)v caption]];
+        } else if ([v isKindOfClass:[NSScrollView class]]) {
+            // 任务列表：列宽与「能不能拖」都从掩码上看，行数用来断言增删
+            NSView *doc = [(NSScrollView *)v documentView];
+            if ([doc isKindOfClass:[NSTableView class]]) {
+                NSTableView *tv = (NSTableView *)doc;
+                NSMutableArray<NSString *> *ws = [NSMutableArray array];
+                NSMutableArray<NSString *> *ms = [NSMutableArray array];
+                for (NSTableColumn *c in tv.tableColumns) {
+                    [ws addObject:[NSString stringWithFormat:@"%.0f", c.width]];
+                    [ms addObject:[NSString stringWithFormat:@"%lu",
+                                   (unsigned long)c.resizingMask]];
+                }
+                extra = [NSString stringWithFormat:@"  rows=%ld w=[%@] mask=[%@]",
+                         (long)tv.numberOfRows,
+                         [ws componentsJoinedByString:@","],
+                         [ms componentsJoinedByString:@","]];
+            }
         } else if ([v isKindOfClass:[NSTableView class]]) {
             extra = [NSString stringWithFormat:@"  cols=%lu rowH=%.0f",
                                                (unsigned long)[(NSTableView *)v numberOfColumns],
                                                [(NSTableView *)v rowHeight]];
         } else if ([v isKindOfClass:[NSButton class]]) {
-            extra = [NSString stringWithFormat:@"  \"%@\" state=%ld",
+            extra = [NSString stringWithFormat:@"  \"%@\" state=%ld enabled=%d",
                                                [(NSButton *)v title],
-                                               (long)[(NSButton *)v state]];
+                                               (long)[(NSButton *)v state],
+                                               [(NSButton *)v isEnabled] ? 1 : 0];
         }
         printf("  %-22s x=%4.0f y=%4.0f w=%4.0f h=%3.0f%s\n",
                NSStringFromClass([v class]).UTF8String,

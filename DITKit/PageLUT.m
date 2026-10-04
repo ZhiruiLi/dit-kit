@@ -30,6 +30,27 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     return a;
 }
 
+#pragma mark - LUT 文件名的判定
+
+/// LUT 的合法后缀（ffmpeg 的 lut3d 只吃这几种）
+static NSArray<NSString *> *DITLUTExtensions(void) {
+    return @[@"cube", @"3dl", @"dat", @"m3d"];
+}
+
+/// 按后缀名判断像不像 LUT 文件（不看文件是否存在）
+static BOOL DITIsLUTPath(NSString *path) {
+    NSString *ext = [[path pathExtension] lowercaseString];
+    return ext.length > 0 && [DITLUTExtensions() containsObject:ext];
+}
+
+/// 从一批路径里挑出第一个像 LUT 的（大小写不敏感）
+static NSString *DITFirstLUTPath(NSArray<NSString *> *paths) {
+    for (NSString *p in paths) {
+        if (DITIsLUTPath(p)) return p;
+    }
+    return nil;
+}
+
 #pragma mark - 工具页
 
 @implementation PageLUT {
@@ -52,7 +73,7 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     NSTextField *_qualityValue;
 
     NSTextField *_filesCount;
-    DropWellView *_filesWell;
+    NSButton *_addFilesBtn, *_removeSelBtn;
     DITJobTable *_jobTable;
     DITActionBar *_actionBar;
 
@@ -94,6 +115,12 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     _lutWell.hint = @"或点击此处选择　·　支持 .cube / .3dl / .dat / .m3d";
     _lutWell.onPaths = ^(NSArray<NSString *> *paths) { [ws setLUTFromPaths:paths]; };
     _lutWell.onClick = ^{ [ws chooseLUT]; };
+    // 后缀名不对（比如顺手拖进来一个视频）就当场拒收，并说明原因
+    _lutWell.willAcceptPaths = ^BOOL(NSArray<NSString *> *paths) {
+        if (DITFirstLUTPath(paths)) return YES;
+        [ws reportRejectedLUT:paths];
+        return NO;
+    };
     [_view addSubview:_lutWell];
 
     // 2 · 输出目录
@@ -178,7 +205,7 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     _qualityHint = DITLabel(@"越大越清晰", 11, NO);
     [_view addSubview:_qualityHint];
 
-    // 4 · 待转换文件
+    // 4 · 待转换文件（列表本身就是拖入区）
     _sec4Label = DITSectionLabel(@"4 · 待转换文件");
     [_view addSubview:_sec4Label];
 
@@ -186,12 +213,17 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     _filesCount.alignment = NSTextAlignmentRight;
     [_view addSubview:_filesCount];
 
-    _filesWell = [[DropWellView alloc] initWithFrame:NSZeroRect];
-    _filesWell.caption = @"把视频拖到这里，支持多选、多目录，也支持整个文件夹";
-    _filesWell.hint = @"或点击此处选择文件";
-    _filesWell.onPaths = ^(NSArray<NSString *> *paths) { [ws addPaths:paths]; };
-    _filesWell.onClick = ^{ [ws chooseVideos]; };
-    [_view addSubview:_filesWell];
+    _addFilesBtn = DITButton(@"添加文件…", self, @selector(chooseVideos));
+    [_view addSubview:_addFilesBtn];
+
+    _removeSelBtn = DITButton(@"删除选中", self, @selector(deleteSelectedJobs));
+    [_view addSubview:_removeSelBtn];
+
+    _jobTable.emptyHint = @"把视频拖到这里";
+    _jobTable.emptySubHint = @"支持多选、多目录，也可以整个文件夹拖进来";
+    _jobTable.onDropPaths = ^(NSArray<NSString *> *paths) { [ws addPaths:paths]; };
+    _jobTable.onSelectionChanged = ^{ [ws refreshAll]; };
+    _jobTable.onDeleteRequested = ^{ [ws deleteSelectedJobs]; };
 
     [_view addSubview:_jobTable.scrollView];
 
@@ -251,11 +283,14 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     DITFrame(_qualityHint, x + 572, cy + 4, 132, 14);
     y += 26 + 14;
 
-    // 4 · 文件
-    DITPlaceSection(_sec4Label, &y, x, w * 0.4);
-    DITFrame(_filesCount, x + w * 0.4, y - 18, w * 0.6, 14);
-    DITFrame(_filesWell, x, y, w, 52);
-    y += 52 + 10;
+    // 4 · 文件（标题行右边放「添加文件…／删除选中」，计数贴左）
+    CGFloat rh = 24.0;
+    DITFrame(_sec4Label, x, y + 4, w * 0.4, 16);
+    CGFloat bw2 = 92.0, bgap = 8.0;
+    DITFrame(_removeSelBtn, x + w - bw2, y, bw2, rh);
+    DITFrame(_addFilesBtn, x + w - bw2 * 2 - bgap, y, bw2, rh);
+    DITFrame(_filesCount, x + w * 0.4, y + 6, w * 0.6 - bw2 * 2 - bgap - 8, 14);
+    y += rh + 8;
 
     // 底部操作栏
     CGFloat tableBottom = [_actionBar layoutFromBottom:H - PAD x:x width:w];
@@ -327,19 +362,53 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     }
 }
 
-- (void)setLUTFromPaths:(NSArray<NSString *> *)paths {
+/// 拖进来的东西里一个 LUT 都没有 —— 把第一个不合格的说出来，别让人以为拖成功了
+- (void)reportRejectedLUT:(NSArray<NSString *> *)paths {
     NSString *first = paths.firstObject;
-    if (!first) return;
+    NSString *name = first ? [first lastPathComponent] : @"";
     BOOL isDir = NO;
-    if ([[NSFileManager defaultManager] fileExistsAtPath:first isDirectory:&isDir] && isDir) {
-        NSBeep();
+    BOOL exists = first && [[NSFileManager defaultManager] fileExistsAtPath:first isDirectory:&isDir];
+    NSBeep();
+    if (first && !exists) {
+        [_actionBar setStatus:[NSString stringWithFormat:@"找不到这个文件：%@", name]];
+    } else if (isDir) {
         [_actionBar setStatus:@"LUT 需要一个文件，不能是文件夹"];
+    } else {
+        [_actionBar setStatus:[NSString stringWithFormat:
+                               @"「%@」不是 LUT 文件，只接受 .cube / .3dl / .dat / .m3d", name]];
+    }
+}
+
+- (void)setLUTFromPaths:(NSArray<NSString *> *)paths {
+    if (paths.count == 0) return;
+
+    // 一次拖进来多个文件时，挑第一个像 LUT 的
+    NSString *candidate = DITFirstLUTPath(paths);
+    BOOL isDir = NO;
+    if (!candidate || ![[NSFileManager defaultManager] fileExistsAtPath:candidate isDirectory:&isDir]
+        || isDir) {
+        [self reportRejectedLUT:paths];
         return;
     }
-    _lutPath = first;
+
+    _lutPath = candidate;
     [self applyLUTDisplay];
     [self saveDefaults];
     [self refreshAll];
+}
+
+/// 自检用：把「拖动进入 → 落点」这两步都走一遍，并把结论打到标准输出
+- (BOOL)simulateLUTDrop:(NSArray<NSString *> *)paths {
+    BOOL accepted = _lutWell.willAcceptPaths ? _lutWell.willAcceptPaths(paths) : YES;
+    NSString *name = paths.count ? [paths.firstObject lastPathComponent] : @"";
+    printf("LUT 拖入: %s  %s\n", accepted ? "接受" : "拒绝", name.UTF8String);
+    fflush(stdout);
+    if (accepted && _lutWell.onPaths) _lutWell.onPaths(paths);
+    return accepted;
+}
+
+- (void)simulateColumnResize:(NSInteger)index delta:(CGFloat)delta {
+    [_jobTable simulateColumnResize:index delta:delta];
 }
 
 - (void)chooseLUT {
@@ -479,6 +548,20 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     [self refreshAll];
 }
 
+- (void)selectAllJobs {
+    [_jobTable selectAllJobs];
+}
+
+/// 只把条目从列表里去掉，不动磁盘上的文件
+- (void)deleteSelectedJobs {
+    if (_engine.isRunning) { NSBeep(); return; }
+    NSInteger n = [_jobTable removeSelectedJobs];
+    if (n == 0) { NSBeep(); return; }
+    [_actionBar setStatus:[NSString stringWithFormat:@"已从列表移除 %ld 个（磁盘上的文件不受影响）",
+                           (long)n]];
+    [self refreshAll];
+}
+
 - (void)startConversion {
     if (_engine.isRunning) return;
     DITOutputOptions *o = [self buildOptions];
@@ -598,7 +681,9 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
     [_actionBar setRunning:running canStart:(_jobTable.jobs.count > 0)];
     [_actionBar setStopEnabled:running && !_stopping];
     _lutWell.enabled = !running;
-    _filesWell.enabled = !running;
+    _jobTable.dropEnabled = !running;
+    _addFilesBtn.enabled = !running;
+    _removeSelBtn.enabled = !running && _jobTable.hasSelection;
     _outField.enabled = !running;
     _outModeSeg.enabled = !running;
     _outChooseBtn.enabled = !running && (_outModeSeg.selectedSegment == 1);

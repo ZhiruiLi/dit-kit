@@ -28,7 +28,7 @@ OUTDIR="${OUTDIR:-./output}"              # 输出目录（保持相对目录结
 SUFFIX="${SUFFIX:-_graded}"               # 输出文件名后缀
 VQ="${VQ:-55}"                            # 画质 1-100，越大越好（40 中等 / 55 好 / 65 高）
 PIXFMT="${PIXFMT:-p010le}"                # 10-bit 像素格式，抑制调色后断层
-JOBS="${JOBS:-2}"                         # 并行数（M1 Pro 建议 2-3，再高内存带宽吃不消）
+JOBS="${JOBS:-2}"                         # 并行数（Apple Silicon 上 2-3 比较稳，再高内存带宽吃不消）
 INTERP="${INTERP:-tetrahedral}"           # 插值方式：tetrahedral（默认，质量最好）
 OVERWRITE="${OVERWRITE:-0}"               # 1 = 覆盖已存在的输出
 VF_PRE="${VF_PRE:-}"                      # 前置滤镜链（HDR 转 SDR、去噪等）

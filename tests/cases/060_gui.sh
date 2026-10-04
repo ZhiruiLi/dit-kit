@@ -156,6 +156,169 @@ c_trim_page_has_content() {
     expect_eq "content" "$(image_band "$png" 260 700)" "裁剪页主体区间应当有内容"
 }
 
+# ---------- 任务列表：把诊断行拆成可断言的小块 ----------
+# 列表那行长这样：
+#   NSScrollView  x=18 y=491 w=668 h=145  rows=0 w=[224,287,145] mask=[2,3,2]
+# rows 用来断言增删；w 是列宽（拖分隔条会变）；mask 是列的 resizingMask，
+# 值里带 NSTableColumnUserResizingMask(=2) 这一位才拖得动。
+
+gui_list_line() {
+    printf '%s' "$1" | grep -m1 'NSScrollView' || true
+}
+
+gui_rows() {
+    printf '%s' "$1" | sed -n 's/.*rows=\([0-9]*\).*/\1/p' | head -1
+}
+
+gui_col_widths() {
+    printf '%s' "$1" | sed -n 's/.*w=\[\([0-9,]*\)\].*/\1/p' | head -1
+}
+
+# 列宽数组里的第 N 列（0 基）
+gui_col_w() {
+    gui_col_widths "$1" | cut -d, -f"$(( $2 + 1 ))"
+}
+
+gui_col_masks() {
+    printf '%s' "$1" | sed -n 's/.*mask=\[\([0-9,]*\)\].*/\1/p' | head -1
+}
+
+# 某个按钮的 enabled 状态（0/1）；找不到就返回空
+gui_button_enabled() {
+    printf '%s' "$1" | grep -F "\"$2\"" | sed -n 's/.*enabled=\([0-9]*\).*/\1/p' | head -1
+}
+
+# 拖入 LUT 时按后缀名把关，别把视频文件当调色文件收下
+# （真实踩过：拖错文件进去，界面上一声不响，什么提示都没有）
+c_lut_drop_rejects_wrong_extension() {
+    gui_available || skip "当前会话没有图形界面"
+    local log
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/lut-reject.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=0 \
+        DITKIT_LUT_DROP="$FIX/solid.mp4")
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" "LUT 拖入: 拒绝  solid.mp4" "视频文件应当被拒绝"
+    expect_contains "$(gui_status "$log")" "不是 LUT 文件" "状态行应当说明拒绝的原因"
+    expect_contains "$(gui_status "$log")" ".cube" "状态行应当列出接受的扩展名"
+}
+
+c_lut_drop_accepts_cube() {
+    gui_available || skip "当前会话没有图形界面"
+    local log
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/lut-accept.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=0 \
+        DITKIT_LUT_DROP="$FIX/identity.cube")
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" "LUT 拖入: 接受  identity.cube" "正确后缀应当被接受"
+    expect_contains "$log" "[identity.cube]" "拖放框应当显示选中的 LUT"
+    expect_not_contains "$(gui_status "$log")" "不是 LUT 文件" "接受时不该出现拒绝提示"
+}
+
+# 文件夹也要拒绝，并且把原因说清楚（不是笼统的一句「不支持」）
+c_lut_drop_rejects_folder() {
+    gui_available || skip "当前会话没有图形界面"
+    local log
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/lut-folder.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=0 DITKIT_LUT_DROP="$FIX")
+    gui_ran "$log" || skip "自检没能启动"
+    expect_contains "$log" "LUT 拖入: 拒绝" "文件夹应当被拒绝"
+    expect_contains "$(gui_status "$log")" "不能是文件夹" "状态行应当说明是文件夹"
+}
+
+# 列表要能选中并删除条目；删完按钮变灰，状态行要说清只动列表、不动磁盘
+c_list_delete_selected() {
+    gui_available || skip "当前会话没有图形界面"
+    local log line
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/list-select.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=1 \
+        DITKIT_DROP="$FIX/ruler_a.mp4|$FIX/ruler_b.mp4" \
+        DITKIT_LIST_ACTION=select-all)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_list_line "$log")
+    expect_eq "2" "$(gui_rows "$line")" "拖入两个文件后的列表行数"
+    expect_eq "1" "$(gui_button_enabled "$log" "删除选中")" "有选中时「删除选中」应当可用"
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/list-delete.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=1 \
+        DITKIT_DROP="$FIX/ruler_a.mp4|$FIX/ruler_b.mp4" \
+        DITKIT_LIST_ACTION=delete-all)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_list_line "$log")
+    expect_eq "0" "$(gui_rows "$line")" "全选删除后的列表行数"
+    expect_eq "0" "$(gui_button_enabled "$log" "删除选中")" "删完没有选中，按钮应当变灰"
+    expect_contains "$(gui_status "$log")" "已从列表移除 2 个" "状态行应当报出移除数量"
+    expect_contains "$(gui_status "$log")" "磁盘上的文件不受影响" "状态行应当说明不影响磁盘文件"
+}
+
+# 列分隔条要能拖，而且拖过之后不能被「按容器宽度重新分配」抹掉
+c_column_divider_is_draggable_and_sticky() {
+    gui_available || skip "当前会话没有图形界面"
+    local base bline log line b0 b1 b2 masks i m
+
+    # 先量一次默认列宽（不拖）
+    defaults_reset
+    base=$(gui_run 60 "$(gui_dir)/col-base.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=1 DITKIT_DROP="$FIX/ruler_a.mp4")
+    gui_ran "$base" || skip "自检没能启动"
+    bline=$(gui_list_line "$base")
+    b0=$(gui_col_w "$bline" 0)
+    b1=$(gui_col_w "$bline" 1)
+    b2=$(gui_col_w "$bline" 2)
+    [ -n "$b0" ] || fail "没能从诊断里读到默认列宽: $bline"
+
+    # 拖分隔条把第 0 列加宽 40，拖完还会再走一遍布局
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/col-drag.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=1 \
+        DITKIT_DROP="$FIX/ruler_a.mp4" DITKIT_COLUMN_DRAG=0:40)
+    gui_ran "$log" || skip "自检没能启动"
+    line=$(gui_list_line "$log")
+    expect_near "$((b0 + 40))" "$(gui_col_w "$line" 0)" 1 "拖后第 0 列宽度（应比默认宽 40）"
+    expect_eq "$b1" "$(gui_col_w "$line" 1)" "第 1 列不该被动"
+    expect_eq "$b2" "$(gui_col_w "$line" 2)" "第 2 列不该被动"
+
+    # 三列都要带 UserResizing 位，否则拖不动
+    masks=$(gui_col_masks "$line")
+    i=0
+    for m in $(printf '%s' "$masks" | tr ',' ' '); do
+        awk -v m="$m" 'BEGIN { exit (int(m / 2) % 2 == 1) ? 0 : 1 }' \
+            || fail "第 ${i} 列不可拖动（resizingMask=${m}，缺 NSTableColumnUserResizingMask 位）"
+        i=$((i + 1))
+    done
+    expect_eq "3" "$i" "参与检查的列数"
+}
+
+# 拖入区与列表合并后：列表自己就是拖入目标，页面上不该再多一个拖放框
+c_list_is_the_only_drop_target() {
+    gui_available || skip "当前会话没有图形界面"
+    local log line wells
+
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/merged.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=1 DITKIT_DROP="$FIX/ruler_a.mp4")
+    gui_ran "$log" || skip "自检没能启动"
+    wells=$(printf '%s' "$log" | grep -c 'DropWellView' || true)
+    expect_eq "0" "$wells" "裁剪页不该再有独立的源文件拖放框"
+    expect_contains "$log" "添加文件…" "应当有独立的「添加文件」按钮"
+    expect_contains "$log" "删除选中" "应当有「删除选中」按钮"
+    line=$(gui_list_line "$log")
+    expect_eq "1" "$(gui_rows "$line")" "文件拖到列表上应当直接进列表"
+
+    # LUT 页保留它自己的 LUT 拖放框 —— 那个是选调色文件的，跟文件列表不是一回事
+    defaults_reset
+    log=$(gui_run 60 "$(gui_dir)/lut-well.log" \
+        DITKIT_APPEARANCE=light DITKIT_PAGE=0 DITKIT_DROP="$FIX/ruler_a.mp4")
+    gui_ran "$log" || skip "自检没能启动"
+    wells=$(printf '%s' "$log" | grep -c 'DropWellView' || true)
+    expect_eq "1" "$wells" "LUT 页只应保留 LUT 拖放框"
+}
+
 reg \
     "两个工具页都能渲染出图"            c_renders_both_pages \
     "浅色主题也能渲染"                  c_renders_light_theme \
@@ -163,4 +326,10 @@ reg \
     "页面主体真的画出来了"              c_page_body_has_content \
     "裁剪页也画得有内容"                c_trim_page_has_content \
     "自检诊断信息正常"                  c_diagnostics_sane \
-    "干净偏好下能正常启动"              c_starts_with_fresh_preferences
+    "干净偏好下能正常启动"              c_starts_with_fresh_preferences \
+    "LUT 拖入会挡掉错误的后缀名"         c_lut_drop_rejects_wrong_extension \
+    "LUT 拖入能收下 .cube"              c_lut_drop_accepts_cube \
+    "LUT 拖入会挡掉文件夹"               c_lut_drop_rejects_folder \
+    "列表能选中并删除条目"              c_list_delete_selected \
+    "列分隔条能拖，且拖后不被覆盖"       c_column_divider_is_draggable_and_sticky \
+    "拖入区已与列表合并"                c_list_is_the_only_drop_target

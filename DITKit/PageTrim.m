@@ -45,6 +45,13 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
 
 #pragma mark - 工具页
 
+/// 裁剪范围下方那行提示的常规文案。
+/// 抽出来是因为 `updateLengthLabel` 在范围超出源时长时会把它换成警告，
+/// 恢复正常时得能原样换回来。
+static NSString *DITRangeHintText(void) {
+    return @"时间可以写 00:01:30.500，也可以写 90 / 1m30s；改完按回车刷新画面";
+}
+
 @interface PageTrim () <NSTextFieldDelegate>
 @end
 
@@ -52,7 +59,6 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     LayoutView *_view;
 
     NSTextField *_sec1Label, *_sec2Label, *_sec3Label, *_sec4Label, *_sec5Label;
-    DropWellView *_srcWell;
     NSTextField *_srcInfoLabel;
 
     NSTextField *_startLabel, *_endLabel, *_lenLabel;
@@ -74,6 +80,7 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     NSTextField *_modeHint;
 
     NSTextField *_filesCount;
+    NSButton *_addFilesBtn, *_removeSelBtn;
     DITJobTable *_jobTable;
     DITActionBar *_actionBar;
 
@@ -96,6 +103,7 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
         _jobTable = [[DITJobTable alloc] init];
         [self buildControls];
         [self loadDefaults];
+        [self refreshSourceInfo];    // 空列表时也要把引导语摆上
         [self refreshAll];
     }
     return self;
@@ -110,16 +118,9 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
 - (void)buildControls {
     __weak PageTrim *ws = self;
 
-    // 1 · 源视频
+    // 1 · 源视频（拖入统一走下面的列表，这里只报当前取样的那一个）
     _sec1Label = DITSectionLabel(@"1 · 源视频");
     [_view addSubview:_sec1Label];
-
-    _srcWell = [[DropWellView alloc] initWithFrame:NSZeroRect];
-    _srcWell.caption = @"把要裁剪的视频拖到这里";
-    _srcWell.hint = @"可以拖多个／整个文件夹，将对所有文件套用同一段范围";
-    _srcWell.onPaths = ^(NSArray<NSString *> *paths) { [ws addPaths:paths]; };
-    _srcWell.onClick = ^{ [ws chooseVideos]; };
-    [_view addSubview:_srcWell];
 
     _srcInfoLabel = DITLabel(@"", 11, NO);
     [_view addSubview:_srcInfoLabel];
@@ -149,6 +150,8 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     [_view addSubview:_endField];
 
     _lenLabel = DITLabel(@"", 11, NO);
+    // 这行字要和右边的按钮挤在一排，放不下时给省略号，别硬顶过去
+    _lenLabel.lineBreakMode = NSLineBreakByTruncatingTail;
     [_view addSubview:_lenLabel];
 
     _fullRangeBtn = [[NSButton alloc] initWithFrame:NSZeroRect];
@@ -176,8 +179,7 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     _endThumbLabel.alignment = NSTextAlignmentCenter;
     [_view addSubview:_endThumbLabel];
 
-    _rangeHint = DITLabel(@"时间可以写 00:01:30.500，也可以写 90 / 1m30s；改完按回车刷新画面",
-                          11, NO);
+    _rangeHint = DITLabel(DITRangeHintText(), 11, NO);
     [_view addSubview:_rangeHint];
 
     // 3 · 输出
@@ -246,13 +248,25 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     _modeHint = DITLabel(@"", 11, NO);
     [_view addSubview:_modeHint];
 
-    // 5 · 待处理文件（拖入统一走上面的源视频区，这里只列清单）
+    // 5 · 待裁剪文件（列表本身就是拖入区）
     _sec5Label = DITSectionLabel(@"5 · 待裁剪文件");
     [_view addSubview:_sec5Label];
 
     _filesCount = DITLabel(@"", 11, NO);
     _filesCount.alignment = NSTextAlignmentRight;
     [_view addSubview:_filesCount];
+
+    _addFilesBtn = DITButton(@"添加文件…", self, @selector(chooseVideos));
+    [_view addSubview:_addFilesBtn];
+
+    _removeSelBtn = DITButton(@"删除选中", self, @selector(deleteSelectedJobs));
+    [_view addSubview:_removeSelBtn];
+
+    _jobTable.emptyHint = @"把要裁剪的视频拖到这里";
+    _jobTable.emptySubHint = @"支持多选、多目录与整个文件夹；所有文件套用同一段范围";
+    _jobTable.onDropPaths = ^(NSArray<NSString *> *paths) { [ws addPaths:paths]; };
+    _jobTable.onSelectionChanged = ^{ [ws refreshAll]; };
+    _jobTable.onDeleteRequested = ^{ [ws deleteSelectedJobs]; };
 
     [_view addSubview:_jobTable.scrollView];
 
@@ -282,10 +296,8 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     CGFloat w = W - PAD * 2;
     CGFloat y = PAD;
 
-    // 1 · 源视频
+    // 1 · 源视频（只有一行信息；拖入统一走下面的列表）
     DITPlaceSection(_sec1Label, &y, x, w);
-    DITFrame(_srcWell, x, y, w, 48);
-    y += 48 + 6;
     DITFrame(_srcInfoLabel, x, y, w, 14);
     y += 14 + 14;
 
@@ -295,8 +307,11 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     DITFrame(_startField, x + 36, y, 150, 24);
     DITFrame(_endLabel, x + 200, y + 3, 32, 18);
     DITFrame(_endField, x + 236, y, 150, 24);
-    DITFrame(_lenLabel, x + 400, y + 3, 180, 18);
-    DITFrame(_fullRangeBtn, x + w - 110, y, 110, 24);
+    // 「用完整时长」按钮靠右摆，片段长度标签必须在它左边收住 ——
+    // 否则「超出源时长」那句提示会被按钮压掉一半
+    CGFloat fullBtnW = 110.0, fullBtnX = x + w - fullBtnW, lenX = x + 394;
+    DITFrame(_lenLabel, lenX, y + 3, MAX(60.0, fullBtnX - 8 - lenX), 18);
+    DITFrame(_fullRangeBtn, fullBtnX, y, fullBtnW, 24);
     y += 24 + 10;
 
     // 两个画面预览并排
@@ -333,10 +348,14 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     DITFrame(_modeHint, x + 464, cy + 3, w - 464, 16);
     y += 24 + 12;
 
-    // 5 · 文件清单
-    DITPlaceSection(_sec5Label, &y, x, w * 0.5);
-    DITFrame(_filesCount, x + w * 0.5, y - 18, w * 0.5, 14);
-    y += 6;
+    // 5 · 文件清单（标题行右边放「添加文件…／删除选中」，计数贴左）
+    CGFloat rh = 24.0;
+    DITFrame(_sec5Label, x, y + 4, w * 0.5, 16);
+    CGFloat bw2 = 92.0, bgap = 8.0;
+    DITFrame(_removeSelBtn, x + w - bw2, y, bw2, rh);
+    DITFrame(_addFilesBtn, x + w - bw2 * 2 - bgap, y, bw2, rh);
+    DITFrame(_filesCount, x + w * 0.5, y + 6, w * 0.5 - bw2 * 2 - bgap - 8, 14);
+    y += rh + 8;
 
     // 底部操作栏
     CGFloat tableBottom = [_actionBar layoutFromBottom:H - PAD x:x width:w];
@@ -473,17 +492,27 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     double s = 0, e = 0;
     if (![self currentRange:&s end:&e quiet:YES]) {
         _lenLabel.stringValue = @"范围无效";
+        _lenLabel.toolTip = nil;
         _lenLabel.textColor = [NSColor systemRedColor];
         return;
     }
     _lenLabel.textColor = [NSColor secondaryLabelColor];
-    NSMutableString *t = [NSMutableString stringWithFormat:@"片段长度 %@",
-                          [DITEngine timeStringFromSeconds:e - s]];
+    _lenLabel.stringValue = [NSString stringWithFormat:@"片段长度 %@",
+                             [DITEngine timeStringFromSeconds:e - s]];
+
+    // 「超出源时长」这句放不进长度标签 —— 那一排只给它一百多点宽，右边还杵着
+    // 「用完整时长」按钮。所以警告改挂到下面整行宽的提示上，顺手改成橙色让它显眼。
     if (_srcDuration > 0 && e > _srcDuration + 0.05) {
-        [t appendFormat:@"（超出源时长 %@，会截断到结尾）",
-                       [DITEngine timeStringFromSeconds:_srcDuration]];
+        NSString *src = [DITEngine timeStringFromSeconds:_srcDuration];
+        _lenLabel.toolTip = [NSString stringWithFormat:@"终点超出源时长 %@，实际会截断到结尾", src];
+        _rangeHint.stringValue = [NSString stringWithFormat:
+            @"终点超出源时长 %@，成品会截断到结尾；时间可以写 90 / 1m30s", src];
+        _rangeHint.textColor = [NSColor systemOrangeColor];
+    } else {
+        _lenLabel.toolTip = @"片段长度 = 终点 − 起点";
+        _rangeHint.stringValue = DITRangeHintText();
+        _rangeHint.textColor = [NSColor secondaryLabelColor];
     }
-    _lenLabel.stringValue = t;
 }
 
 #pragma mark 画面预览
@@ -601,7 +630,8 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     if (!first) {
         _srcPath = nil;
         _srcDuration = 0;
-        _srcInfoLabel.stringValue = @"";
+        _srcInfoLabel.stringValue = @"还没有选择文件 —— 把视频拖到下面的列表，或点「添加文件…」";
+        _srcInfoLabel.textColor = [NSColor tertiaryLabelColor];
         _startThumb.image = nil;
         _endThumb.image = nil;
         _startThumbLabel.stringValue = @"起点画面";
@@ -692,6 +722,27 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     [_actionBar setProgress:0];
     [_actionBar setStatus:@"就绪"];
     [self refreshSourceInfo];
+    [self refreshAll];
+}
+
+- (void)selectAllJobs {
+    [_jobTable selectAllJobs];
+}
+
+- (void)simulateColumnResize:(NSInteger)index delta:(CGFloat)delta {
+    [_jobTable simulateColumnResize:index delta:delta];
+}
+
+/// 只把条目从列表里去掉，不动磁盘上的文件
+- (void)deleteSelectedJobs {
+    if (_engine.isRunning) { NSBeep(); return; }
+    NSInteger n = [_jobTable removeSelectedJobs];
+    if (n == 0) { NSBeep(); return; }
+    [_actionBar setStatus:[NSString stringWithFormat:@"已从列表移除 %ld 个（磁盘上的文件不受影响）",
+                           (long)n]];
+    // 取样的第一个文件可能正好被删掉了，源信息与画面预览都要跟着刷新
+    [self refreshSourceInfo];
+    [self scheduleThumbnails];
     [self refreshAll];
 }
 
@@ -817,7 +868,9 @@ NSArray<NSString *> *DITTrimArguments(DITJob *job, DITTrimSpec *spec) {
     BOOL running = _engine.isRunning;
     [_actionBar setRunning:running canStart:(_jobTable.jobs.count > 0)];
     [_actionBar setStopEnabled:running && !_stopping];
-    _srcWell.enabled = !running;
+    _jobTable.dropEnabled = !running;
+    _addFilesBtn.enabled = !running;
+    _removeSelBtn.enabled = !running && _jobTable.hasSelection;
     _outField.enabled = !running;
     _outModeSeg.enabled = !running;
     _outChooseBtn.enabled = !running && (_outModeSeg.selectedSegment == 1);

@@ -15,6 +15,9 @@ NSArray<NSString *> *DITLUTArguments(DITJob *job, NSString *lutPath, NSInteger q
 + (int)runCLI:(NSArray<NSString *> *)args;
 /// --cli 的用法说明
 + (NSString *)cliUsage;
+/// 自检用：模拟把一批路径拖进 LUT 拖放区（先过接收判断，再走落点处理）。
+/// 返回是否被接收，并把结论打到标准输出，方便用例断言。
+- (BOOL)simulateLUTDrop:(NSArray<NSString *> *)paths;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -20,6 +20,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL enabled;
 @property (nonatomic, copy, nullable) void (^onPaths)(NSArray<NSString *> *paths);
 @property (nonatomic, copy, nullable) void (^onClick)(void);
+/// 可选的接收判断：返回 NO 时拖放区不亮起、也不接受放下（例如后缀名不对）。
+/// 块里可以顺手更新状态行，把拒绝的原因讲清楚。
+@property (nonatomic, copy, nullable) BOOL (^willAcceptPaths)(NSArray<NSString *> *paths);
 @end
 
 #pragma mark - 容器
@@ -35,6 +38,8 @@ NS_ASSUME_NONNULL_BEGIN
 NSTextField *DITLabel(NSString *text, CGFloat size, BOOL bold);
 /// 分区标题，如「1 · LUT 文件」
 NSTextField *DITSectionLabel(NSString *text);
+/// 次要操作的圆角小按钮（「添加文件…」「删除选中」这类）
+NSButton *DITButton(NSString *title, id _Nullable target, SEL _Nullable action);
 /// 统一取整摆放，避免亚像素造成的模糊
 void DITFrame(NSView *_Nullable v, CGFloat x, CGFloat y, CGFloat w, CGFloat h);
 /// 摆放分区标题并把 y 推进到内容起点
@@ -42,14 +47,45 @@ void DITPlaceSection(NSTextField *_Nullable label, CGFloat *y, CGFloat x, CGFloa
 
 #pragma mark - 任务表格
 
-/// 三列任务表（文件 / 位置 / 状态），各工具页共用
+/// 三列任务表（文件 / 位置 / 状态），各工具页共用。
+///
+/// 列表本身就是拖入区：整块内容视图（含行下方的空白）都能接住文件，
+/// 空列表时在中间显示引导文字。列分隔条可以拖，拖过之后就不再自动分配列宽。
 @interface DITJobTable : NSObject
 @property (nonatomic, strong, readonly) NSScrollView *scrollView;
 @property (nonatomic, strong, readonly) NSMutableArray<DITJob *> *jobs;
+
+/// 空列表时显示在中间的引导（主句 + 可选副句）
+@property (nonatomic, copy, nullable) NSString *emptyHint;
+@property (nonatomic, copy, nullable) NSString *emptySubHint;
+
+/// 拖入文件/文件夹时回调；paths 没做过滤，由工具页决定怎么处理
+@property (nonatomic, copy, nullable) void (^onDropPaths)(NSArray<NSString *> *paths);
+/// 处理中要关掉拖入
+@property (nonatomic, assign) BOOL dropEnabled;
+/// 选中项变化（用来刷新「删除选中」按钮的可用状态）
+@property (nonatomic, copy, nullable) void (^onSelectionChanged)(void);
+/// 在列表里按了 Delete / Backspace（等价于点「删除选中」）
+@property (nonatomic, copy, nullable) void (^onDeleteRequested)(void);
+
+@property (nonatomic, readonly) BOOL hasSelection;
+@property (nonatomic, readonly, copy) NSArray<DITJob *> *selectedJobs;
+/// 删除选中项，返回实际删掉的条数
+- (NSInteger)removeSelectedJobs;
+/// 全选（自检与「删除选中」配合用）
+- (void)selectAllJobs;
+
 - (void)reloadAll;
 - (void)reloadRowOfJob:(DITJob *)job;
-/// 按容器宽度重算三列列宽（位置列吃掉余量）
+/// 按容器宽度重算三列列宽（位置列吃掉余量）；用户拖过分隔条之后不再生效
 - (void)layoutColumnsForWidth:(CGFloat)w;
+
+/// 自检用：直接把第 index 列加宽 delta，等价于用户拖了一下分隔条
+- (void)simulateColumnResize:(NSInteger)index delta:(CGFloat)delta;
+/// 自检/诊断用：当前各列列宽
+@property (nonatomic, readonly, copy) NSArray<NSNumber *> *columnWidths;
+/// 自检/诊断用：当前各列的 resizingMask（含 NSTableColumnUserResizingMask 才拖得动）
+@property (nonatomic, readonly, copy) NSArray<NSNumber *> *columnResizingMasks;
 @end
 
 #pragma mark - 底部操作栏
@@ -95,6 +131,12 @@ void DITPlaceSection(NSTextField *_Nullable label, CGFloat *y, CGFloat x, CGFloa
 - (void)beginRun;
 /// 直接停止（等价于点「停止」按钮；主要给自检用）
 - (void)beginStop;
+/// 全选列表里的条目（自检用）
+- (void)selectAllJobs;
+/// 删除列表里选中的条目（等价于点「删除选中」按钮；自检用）
+- (void)deleteSelectedJobs;
+/// 自检用：模拟拖动列表的列分隔条（把第 index 列加宽 delta）
+- (void)simulateColumnResize:(NSInteger)index delta:(CGFloat)delta;
 /// 状态行当前文字（自检断言用）
 - (NSString *)statusLine;
 @end
